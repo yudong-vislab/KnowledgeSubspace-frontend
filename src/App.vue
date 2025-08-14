@@ -54,5 +54,6 @@ html, body, #app { height: 100%; margin: 0; background: #f3f4f6; }
   scrollbar-width: none;                      /* Firefox */
 }
 .col-center::-webkit-scrollbar { width: 0; height: 0; } /* WebKit */
+.col-right { border-left: 1px solid #eee; background: #f3f4f6; }
 </style>
 

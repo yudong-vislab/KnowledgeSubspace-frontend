@@ -7,44 +7,50 @@ import { fetchSemanticMap, createSubspace, renameSubspace } from '../lib/api'
 const outerRef = ref(null)
 const playgroundRef = ref(null)
 const globalOverlayRef = ref(null)
-const mainTitleRef = ref(null)          // ✅ 新增：主标题的 ref
+const mainTitleRef = ref(null)        // 如果有可编辑主标题
 let controller = null
+const ready = ref(false)              // 防止未就绪就点击
 
 onMounted(async () => {
   await nextTick()
-  const data = await fetchSemanticMap()
+  if (!outerRef.value || !playgroundRef.value || !globalOverlayRef.value) return
 
+  const data = await fetchSemanticMap()
   controller = await initSemanticMap({
     outerEl: outerRef.value,
     playgroundEl: playgroundRef.value,
     globalOverlayEl: globalOverlayRef.value,
-    mainTitleEl: mainTitleRef.value,     // ✅ 把标题 DOM 传进去
+    mainTitleEl: mainTitleRef.value,           // 若你给了主标题可编辑功能
     initialData: data
   })
 
-  // 子空间重命名
   controller.setOnSubspaceRename(async (idx, newName) => {
     await renameSubspace(idx, newName)
   })
 
-  // 主标题重命名（可选：同步到后端）
-  controller.setOnMainTitleRename(async (newTitle) => {
-    // TODO: 在这里调用你的 API 保存主标题
-    // await saveMainTitle(newTitle)
-    console.log('[MainView] main title renamed to:', newTitle)
-  })
+  ready.value = true
 })
 
 onBeforeUnmount(() => controller?.cleanup?.())
+
+// 点击“新增子空间”时调用
+async function onAddSubspace() {
+  if (!ready.value || !controller) return
+  // 1) 让后端/状态层创建一条空子空间（可选）
+  const created = await createSubspace({})        // 若没有后端，可直接跳过这行
+  // 2) 用 semanticMap 的公开 API 插入
+  controller.addSubspace?.(created?.subspace || { subspaceName: 'New Subspace', hexList: [] })
+}
 </script>
 
 <template>
   <div class="mainview">
     <header class="mv-header">
-      <h2 class="mv-title" ref="mainTitleRef">Semantic Map</h2>  <!-- ✅ 绑定 ref -->
+      <h2 class="mv-title" ref="mainTitleRef">Semantic Map</h2> 
       <div class="mv-actions">
         <button class="add-btn" @click="onAddSubspace" title="Add subspace">＋</button>
-        <button class="filter-btn" title="Filter">F</button>
+        <button class="filter-btn" title="Filter">Filter</button>
+        <button class="save-btn" title="Save">Save</button>
       </div>
     </header>
 
@@ -74,7 +80,7 @@ onBeforeUnmount(() => controller?.cleanup?.())
   display: flex;
   align-items: center;
   justify-content: space-between; /* 左侧标题 & 右侧按钮 */
-  padding: 8px 12px;
+  padding: 8px;
   background: #fff;     /* 固定栏底色 */
   border-bottom: 1px solid #eee;
 }
@@ -82,7 +88,7 @@ onBeforeUnmount(() => controller?.cleanup?.())
 /* 标题文字 */
 .mv-title {
   margin: 0;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: #333;
 }
@@ -129,96 +135,6 @@ onBeforeUnmount(() => controller?.cleanup?.())
   scrollbar-color: rgba(0,0,0,.25) transparent;
 }
 
-/* playground 占满滚动容器宽度，最小高度保证背景铺满 */
-#playground {
-  position: relative;
-  min-height: 100%;
-  width: 100%;
-  padding: 32px;
-  background: #fff;  /* 背景跟随滚动区 */
-  box-sizing: border-box;
-}
 
-/* 覆盖层要绝对定位到 playground 内 */
-#global-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 9999;
-  pointer-events: none;
-}
 
-/* ====== 子空间（跟你现有的 style.css 一致，如需要可以保留） ====== */
-#playground .subspace {
-  position: absolute;
-  min-width: 360px;
-  min-height: 400px;
-  max-width: 1000px;
-  max-height: 1000px;
-  left: 0; top: 0;
-  resize: both;
-  overflow: auto;
-  background: #fff;
-  border: 1.5px solid #aaa;
-  border-radius: 10px;
-  box-shadow: 0 2px 10px #0001;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: flex-start;
-  user-select: none;
-  z-index: 1;
-}
-
-#playground .subspace-title {
-  cursor: move;
-  font-size: 14px;
-  color: #666;
-  text-align: center;
-  margin: 5px 0 2px 0;
-  pointer-events: auto;
-  user-select: none;
-  position: relative;
-  z-index: 20;
-}
-
-#playground .hex-container {
-  position: relative;
-  width: 100%;
-  height: 92%;
-  flex: 1;
-}
-
-#playground .hex-svg,
-#playground .overlay-svg {
-  position: absolute;
-  left: 0; top: 0;
-  width: 100%;
-  height: 100%;
-}
-
-#playground .overlay-svg {
-  pointer-events: none;
-}
-
-/* ====== 顶部按钮样式（居中、大小可调） ====== */
-.add-btn,
-.filter-btn {
-  display: inline-flex;        /* 用 flex 保证字符始终在正中 */
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  font-size: 14px;             /* 调整按钮内字的大小 */
-  line-height: 1;              /* 避免受行高影响 */
-  border: 1px solid #ddd;
-  border-radius: 999px;
-  background: #fff;
-  cursor: pointer;
-  box-shadow: 0 2px 2px rgba(0,0,0,.08);
-}
-
-.add-btn:hover,
-.filter-btn:hover {
-  background: #f7f7f7;
-}
 </style>

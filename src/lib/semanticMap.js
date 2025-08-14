@@ -1027,8 +1027,6 @@ export async function initSemanticMap({
       App.onMainTitleRename = typeof fn === 'function' ? fn : null;
     },
 
-    
-
   };
 
   return controller;
