@@ -69,6 +69,7 @@ export async function initSemanticMap({
   outerEl,
   playgroundEl,
   globalOverlayEl,
+  mainTitleEl, 
   initialData
 }) {
   // ---- 兜底：允许用 ID 获取，且必须校验 ----
@@ -133,6 +134,8 @@ export async function initSemanticMap({
     flightHoverTarget: null,  // 起点后，鼠标悬停到的另一个 hex（让两端高亮）
     hoveredHex: null,         // 当前 hover 的 hex（用于 hover 高亮）
     _clickTimer: null,
+    onSubspaceRename: null,
+    onMainTitleRename: null,   // 主标题重命名回调
     
     // 新增：最近一次完成连线的两端，用来保留高亮
     flightEndpointsHighlight: null, // { a:{panelIdx,q,r}, b:{panelIdx,q,r} } or null
@@ -219,6 +222,49 @@ export async function initSemanticMap({
     return [tx + offsetX, ty + offsetY];
   }
 
+  function setupInlineEditableTitle(el, {
+    getInitial = () => el?.textContent?.trim() || '',
+    placeholder = 'Untitled',
+    onRename = async (newText) => {}
+  } = {}) {
+    if (!el) return;
+
+    el.addEventListener('dblclick', () => {
+      // 进入可编辑
+      el.setAttribute('contenteditable', 'true');
+      el.focus();
+
+      // 全选当前文字
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+
+      const finish = async (commit = true) => {
+        el.removeAttribute('contenteditable');
+
+        if (commit) {
+          const txt = (el.textContent || '').trim() || placeholder;
+          el.textContent = txt;
+          try { await onRename(txt); } catch(e) { console.warn(e); }
+        } else {
+          // 取消编辑还原
+          el.textContent = getInitial();
+        }
+      };
+
+      const onBlur = () => finish(true);
+      const onKey = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      };
+
+      el.addEventListener('blur', onBlur, { once: true });
+      el.addEventListener('keydown', onKey, { once: true });
+    });
+  }
+
+
   /** ==================
    *  DOM 构建/子空间
    *  ================== */
@@ -246,19 +292,6 @@ export async function initSemanticMap({
     closeBtn.className = 'subspace-close';
     closeBtn.textContent = '×';
     closeBtn.title = 'Delete Subspace';
-    Object.assign(closeBtn.style, {
-      position: 'absolute',
-      top: '6px',
-      right: '8px',
-      width: '22px',
-      height: '22px',
-      lineHeight: '18px',
-      borderRadius: '999px',
-      border: '1px solid #ddd',
-      background: '#fff',
-      cursor: 'pointer',
-      zIndex: 30,
-    });
     closeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const idxNow = Number(div.dataset.index ?? i);
@@ -626,7 +659,7 @@ export async function initSemanticMap({
 
           // 优先级：航线起点/目标/持久选中 > hover > 邻居 > 默认
           if (isPersistent || isFlightStart || isFlightHoverTarget) {
-            opacity = STYLE.OPACITY_SELECTED;   // 1.0
+            opacity = STYLE.OPACITY_HOVER;   // or OPACITY_SELECTED
           } else if (isHovered) {
             opacity = STYLE.OPACITY_HOVER;      // 0.8
           } else if (isNeighbor) {
@@ -881,6 +914,28 @@ export async function initSemanticMap({
 
   // ====== 初始化：用外部传入数据 ======
   renderSemanticMapFromData(initialData || { subspaces: [], links: [] });
+
+  App.globalOverlayEl.setAttribute('width', App.playgroundEl.clientWidth);
+  App.globalOverlayEl.setAttribute('height', App.playgroundEl.clientHeight);
+
+  // 主标题：双击可编辑
+  if (mainTitleEl) {
+    setupInlineEditableTitle(mainTitleEl, {
+      getInitial: () => (
+        (App.currentData?.title ?? (mainTitleEl.textContent || '').trim()) || 'Semantic Map'
+      ),
+
+      placeholder: 'Semantic Map',
+      onRename: async (newText) => {
+        if (!App.currentData) App.currentData = {};
+        App.currentData.title = newText;            // 本地状态同步
+        if (typeof App.onMainTitleRename === 'function') {
+          await App.onMainTitleRename(newText);     // 对外回调（交给上层保存）
+        }
+      }
+    });
+  }
+
   // 初始同步一次全局 overlay 尺寸（防 0 宽高）
   App.globalOverlayEl.setAttribute('width', App.playgroundEl.clientWidth);
   App.globalOverlayEl.setAttribute('height', App.playgroundEl.clientHeight);
@@ -968,10 +1023,17 @@ export async function initSemanticMap({
     deleteSubspace(idx) {
       _deleteSubspaceByIndex(idx);
     },
+    setOnMainTitleRename(fn) {
+      App.onMainTitleRename = typeof fn === 'function' ? fn : null;
+    },
+
+    
+
   };
 
   return controller;
 }
+
 
 export function destroySemanticMap(cleanup) {
   if (typeof cleanup === 'function') cleanup();

@@ -5,44 +5,111 @@ html, body, #app { height: 100%; margin: 0; }
 * { box-sizing: border-box; }
 
 /* ========== 主视图容器（模板内元素） ========== */
+/* ======= 中间容器：作为滚动容器 ======= */
 #outer-container {
+  position: relative;
   width: 100%;
   height: 100%;
-  margin: 0 auto;
-  position: relative;
-  background: #eee;
-  overflow: hidden;
-}
-
-#playground {
-  width: 100%;
-  height: 100%;
-  position: relative;
-  margin: 0;
-  padding: 32px;
   background: #fff;
-  box-sizing: border-box;
-  overflow: visible;
+  /* 允许滚动 + 稳定滚动槽，避免内容被滚动条挤动 */
+  overflow: auto;
+  scrollbar-gutter: stable both-edges;
 }
 
-/* ========== D3 动态创建的元素（放到 #playground 下面，避免全局污染） ========== */
+/* 标题栏固定在容器顶部，不参与滚动 */
+#center-header {
+  position: sticky;        /* 关键：相对滚动容器“粘顶” */
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  padding: 8px 12px;
+  background: #fff;        /* 给个底色，滚动时不会透出下面内容 */
+  border-bottom: 1px solid #eee;
+}
+
+.center-title {
+  margin: 0;
+  font-size: 14px;
+  color: #666;
+}
+
+/* 标题右侧按钮组 */
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 按钮——保持始终居中，无需调行高 */
+.add-btn,
+.filter-btn {
+  display: inline-flex;        /* 用 flex 居中 */
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 14px;
+  line-height: 1;              /* 不再靠 line-height 控制居中 */
+  cursor: pointer;
+  box-shadow: 0 2px 2px rgba(0,0,0,.08);
+}
+.add-btn:hover,
+.filter-btn:hover {
+  background: #f7f7f7;
+}
+
+/* playground 占满剩余空间；min-height 让背景跟着内容拉长 */
+#playground {
+  position: relative;
+  padding: 32px;
+  min-height: calc(100% - 44px); /* 44≈header高度(含边框)，按你的header实际高度微调 */
+  background: inherit;
+  box-sizing: border-box;
+}
+
+/* ======= 自动隐藏滚动条：默认隐藏，hover时显示 ======= */
+/* Chrome / Safari / Edge (Blink/WebKit) */
+#outer-container::-webkit-scrollbar {
+  width: 0;       /* 默认隐藏 */
+  height: 0;
+}
+#outer-container:hover::-webkit-scrollbar {
+  width: 10px;    /* 悬停才显示 */
+  height: 10px;
+}
+#outer-container:hover::-webkit-scrollbar-track {
+  background: transparent;
+}
+#outer-container:hover::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,.25);
+  border-radius: 8px;
+}
+
+/* Firefox */
+#outer-container {
+  scrollbar-width: none;           /* 默认隐藏 */
+}
+#outer-container:hover {
+  scrollbar-width: thin;           /* 悬停显示为细滚动条 */
+  scrollbar-color: rgba(0,0,0,.25) transparent;
+}
+
+/* ======= 子空间（面板） ======= */
 #playground .subspace {
   position: absolute;
   min-width: 360px;
   min-height: 400px;
-  max-width: 1000px;
-  max-height: 1000px;
-  left: 0; top: 0;
-  resize: both;
-  overflow: auto;
   background: #fff;
   border: 1.5px solid #aaa;
   border-radius: 10px;
   box-shadow: 0 2px 10px #0001;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  justify-content: flex-start;
   user-select: none;
   z-index: 1;
 }
@@ -52,9 +119,7 @@ html, body, #app { height: 100%; margin: 0; }
   font-size: 14px;
   color: #666;
   text-align: center;
-  margin: 5px 0 2px 0;
-  pointer-events: auto;
-  user-select: none;
+  margin: 5px 0 2px;
   position: relative;
   z-index: 20;
 }
@@ -76,47 +141,29 @@ html, body, #app { height: 100%; margin: 0; }
 }
 
 #playground .overlay-svg,
-#global-overlay {
-  pointer-events: none;
-}
+#global-overlay { pointer-events: none; }
 
-/* ===== 层级修正：保证全局 flight 在线条最上方 ===== */
-#playground { position: relative; z-index: 0; }
-
-/* 每个面板容器本身保持较低层级 */
-#playground .subspace { z-index: 1; position: absolute; }
-
-/* 面板内：六边形在下，局部覆盖线在上 */
-#playground .hex-svg     { z-index: 1; position: absolute; }
-#playground .overlay-svg { z-index: 2; position: absolute; pointer-events: none; }
-
-/* 全局覆盖层：永远在最上 */
+/* 全局覆盖层：在最上 */
 #global-overlay {
   position: absolute;
-  inset: 0;              /* 等价于 top/right/bottom/left: 0 */
+  inset: 0;
   z-index: 9999;
-  pointer-events: none;
 }
 
-/* 右上角小按钮 */
-#outer-container {
-  position: relative;
-}
-.add-btn {
+/* 子空间右上角删除按钮（hover 变深红） */
+.subspace-close {
   position: absolute;
-  top: 8px;
+  top: 4px;
   right: 8px;
-  width: 36px;
-  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   border: 1px solid #ddd;
   border-radius: 999px;
   background: #fff;
-  font-size: 20px;
-  line-height: 1;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0,0,0,.08);
-  z-index: 2000;                 /* 要比 #global-overlay(100) 更高 */
+  z-index: 30;
 }
-.add-btn:hover {
-  background: #f7f7f7;
-}
+.subspace-close:hover { background: darkred; color: #fff; }
