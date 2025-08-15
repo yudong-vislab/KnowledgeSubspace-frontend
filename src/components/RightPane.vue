@@ -1,57 +1,66 @@
-<!-- src/components/RightPane.vue -->
 <template>
   <div class="rp-shell">
-    <!-- 上部：1 份高度 -->
+    <!-- 上半卡片：Step Analysis -->
     <section class="rp-card">
       <header class="card__title">Step Analysis</header>
       <div class="rp-card__body">
-        <!-- 你的属性面板内容 -->
+        <div ref="visRef" class="stepvis-host"></div>
       </div>
     </section>
 
-    <!-- 下部：2 份高度 -->
+    <!-- 下半卡片：Details（原样） -->
     <section class="rp-card">
       <header class="card__title">Details</header>
       <div class="rp-card__body">
-        <!-- 你的详情、日志等内容 -->
+        <!-- 细节面板… -->
       </div>
     </section>
   </div>
 </template>
 
+<script setup>
+import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { initStepVis } from '../lib/stepVis'
+import { onSelectionChange } from '../lib/selectionBus'
+
+const visRef = ref(null)
+let vis = null
+let off = null
+
+onMounted(() => {
+  vis = initStepVis({ container: visRef.value, initial: { nodes: [], links: [] } })
+  // 订阅来自主视图的 selection
+  off = onSelectionChange((payload) => {
+    vis?.update(payload)
+  })
+})
+
+onBeforeUnmount(() => {
+  off?.()
+  vis?.destroy?.()
+})
+</script>
+
 <style scoped>
-/* 外层：灰色底、上下栅格 1:2、统一内边距与卡片间距 */
-.rp-shell {
+.rp-shell{
   height: 100%;
   display: grid;
-  grid-template-rows: 1fr 2fr;  /* 上:下 = 1:2 */
-  gap: 6px;                    /* 上下间距 */
-  background: #f3f4f6;          /* 浅灰底色 */
+  grid-template-rows: 1fr 1fr; /* 先均分，上下比例你可再调 */
+  gap: 6px;
+  background: #f3f4f6;
   box-sizing: border-box;
 }
 
-/* 卡片：白底、圆角、阴影、竖向布局 */
-.rp-card {
-  background: #fff;
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;                 /* 让内部可滚 */
+.rp-card{
+  background:#fff; border-radius:12px;
+  display:flex; flex-direction:column; min-height:0; overflow:hidden;
 }
 
-/* 标题行：与内容分隔清晰 */
-.card__title {
-  font-size: 14px;
-  font-weight: 600;
-  color: #333;
-  border-bottom: 1px solid #eee;
-  padding: 8px;
+.rp-card__body{
+  padding: 8px; min-height:0; overflow:auto;
 }
 
-/* 内容区：可滚动，边距统一 */
-.rp-card__body {
-  padding: 10px;
-  overflow: auto;
-  min-height: 0;
-}
+/* 可视化容器占满 */
+.stepvis-host{ width:100%; height:100%; }
+.stepvis-svg{ display:block; }
 </style>

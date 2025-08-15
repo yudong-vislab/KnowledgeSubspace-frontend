@@ -1,5 +1,6 @@
 // src/lib/semanticMap.js
 import * as d3 from 'd3';
+// import { emitSelection } from './selectionBus'
 
 /** =========================
  *  可配置样式与常量（集中声明）
@@ -78,7 +79,6 @@ export async function initSemanticMap({
   if (!playgroundEl || !globalOverlayEl) {
     throw new Error('[semanticMap] playgroundEl/globalOverlayEl is missing. Call after nextTick() and ensure refs exist.');
   }
-
   /** =========
    * App 状态
    * ========= */
@@ -175,6 +175,40 @@ export async function initSemanticMap({
     }
     return out;
   }
+
+  // 根据一个已选中的点，把与它 flight 相连的另一端加入邻居集合（支持跨 panel）
+  function addFlightNeighbors(panelIdx, q, r) {
+    for (const link of App._lastLinks || []) {
+      if (link.type !== 'flight') continue;
+      const a = link.path?.[0];
+      const b = link.path?.[link.path.length - 1];
+      if (!a || !b) continue;
+
+      // 解析两端的 panel（兼容 a/b 上带 panelIdx、以及 link.panelIdxFrom/To、或退化到 link.panelIdx）
+      const aPanel = (typeof a.panelIdx === 'number')
+        ? a.panelIdx
+        : (typeof link.panelIdxFrom === 'number')
+          ? link.panelIdxFrom
+          : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+
+      const bPanel = (typeof b.panelIdx === 'number')
+        ? b.panelIdx
+        : (typeof link.panelIdxTo === 'number')
+          ? link.panelIdxTo
+          : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+
+      const isA = (a.q === q && a.r === r && aPanel === panelIdx);
+      const isB = (b.q === q && b.r === r && bPanel === panelIdx);
+
+      if (isA) {
+        App.neighborKeySet.add(`${bPanel}|${b.q},${b.r}`);
+      }
+      if (isB) {
+        App.neighborKeySet.add(`${aPanel}|${a.q},${a.r}`);
+      }
+    }
+  }
+
 
   function getHexFillColor(d) {
     if (d.modality === 'text')  return App.config.hex.textFill;
@@ -620,12 +654,16 @@ export async function initSemanticMap({
         const panelIdx = +panelStr, q = +qStr, r = +rStr;
         const ns = getConnectedHexKeys(panelIdx, q, r);
         ns.forEach(hk => App.neighborKeySet.add(`${panelIdx}|${hk}`));
+        //flight 对端邻居（可能跨 panel）
+        addFlightNeighbors(panelIdx, q, r);
       }
 
       // 如果你仍想保留“最近一次单击的点”的邻居高亮，也可以加上：
       if (App.selectedHex) {
         const ns2 = getConnectedHexKeys(App.selectedHex.panelIdx, App.selectedHex.q, App.selectedHex.r);
         ns2.forEach(hk => App.neighborKeySet.add(`${App.selectedHex.panelIdx}|${hk}`));
+
+        addFlightNeighbors(App.selectedHex.panelIdx, App.selectedHex.q, App.selectedHex.r);
       }
 
       // 2) 应用样式
@@ -673,7 +711,64 @@ export async function initSemanticMap({
       });
     }
 
+  // —— 生成保存/右侧用的快照 ——
+  // 只用已“持久选中”的 hex（App.persistentHexKeys）做 nodes；
+  // links 来自 App._lastLinks，但会把 panelIdx 解析正确。
+  function buildSelectionSnapshot() {
+    const nodes = [];
+    const links = [];
 
+    // nodes：来自持久集合
+    for (const k of App.persistentHexKeys) {
+      const [panelIdxStr, qr] = k.split('|');
+      const [qStr, rStr] = qr.split(',');
+      const panelIdx = +panelIdxStr, q = +qStr, r = +rStr;
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      if (hex) {
+        nodes.push({
+          id: `${panelIdx}:${q},${r}`,
+          label: hex.label || `${q},${r}`,
+          modality: hex.modality || '',
+          panelIdx, q, r
+        });
+      }
+    }
+
+    // links：来自 _lastLinks，稳健解析 panelIdx
+    for (const e of App._lastLinks || []) {
+      if (!e.path || e.path.length < 2) continue;
+
+      const a = e.path[0];
+      const b = e.path[e.path.length - 1];
+
+      // 解析每个端点的 panelIdx：优先点上携带，其次链路级 panelIdx，
+      // 再次 flight 的 panelIdxFrom/To（兼容双端面板不同）
+      const aPanel = (typeof a.panelIdx === 'number')
+        ? a.panelIdx
+        : (typeof e.panelIdx === 'number')
+          ? e.panelIdx
+          : (typeof e.panelIdxFrom === 'number' ? e.panelIdxFrom : 0);
+
+      const bPanel = (typeof b.panelIdx === 'number')
+        ? b.panelIdx
+        : (typeof e.panelIdx === 'number')
+          ? e.panelIdx
+          : (typeof e.panelIdxTo === 'number' ? e.panelIdxTo : 0);
+
+      const sid = `${aPanel}:${a.q},${a.r}`;
+      const tid = `${bPanel}:${b.q},${b.r}`;
+
+      links.push({
+        id: e.id || `${sid}->${tid}`,
+        source: sid,
+        target: tid,
+        type: e.type || 'road',
+        weight: e.weight
+      });
+    }
+
+    return { nodes, links };
+  }
 
   /** =========
    * 单/双击处理
@@ -694,6 +789,8 @@ export async function initSemanticMap({
       App.selectedHex = { panelIdx, q, r };
     }
     updateHexStyles();
+    console.debug('[semanticMap] selected count =', App.persistentHexKeys.size);
+    publishToStepAnalysis(); //其他图交互
   }
 
   function handleDoubleClick(panelIdx, q, r, event) {
@@ -711,6 +808,7 @@ export async function initSemanticMap({
       updateHexStyles();
 
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, true);
+      publishToStepAnalysis();
       return;
     }
 
@@ -722,6 +820,7 @@ export async function initSemanticMap({
       App.flightStart = null;
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
       updateHexStyles();
+      publishToStepAnalysis();
       return;
     }
 
@@ -735,6 +834,9 @@ export async function initSemanticMap({
     App.flightStart = null;
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
     updateHexStyles();
+
+    publishToStepAnalysis(); 
+
   }
 
 
@@ -753,6 +855,15 @@ export async function initSemanticMap({
     App._lastLinks.push(flight);
     // 画永久航线
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
+    publishToStepAnalysis(); 
+
+  }
+
+  /** =========
+   * 响应选择交互
+   * ========= */
+  function publishToStepAnalysis() {
+    App._lastSnapshot = buildSelectionSnapshot();
   }
 
   /** =========
@@ -857,6 +968,7 @@ export async function initSemanticMap({
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
     observePanelResize();
     updateHexStyles();
+    publishToStepAnalysis();
 
     const resizeHandler = () => {
       (data.subspaces || []).forEach((space, i) => renderHexGridFromData(i, space, App.config.hex.radius));
@@ -895,6 +1007,7 @@ export async function initSemanticMap({
       App.selectedHex = null;
       App.neighborKeySet.clear();
       updateHexStyles();
+      publishToStepAnalysis();
     }
   };
   const onBlankDblClick = (e) => {
@@ -903,6 +1016,7 @@ export async function initSemanticMap({
       App.flightHoverTarget = null;
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
       updateHexStyles();
+      publishToStepAnalysis();
     }
   };
   App.playgroundEl.addEventListener('click', onBlankClick);
@@ -992,6 +1106,9 @@ export async function initSemanticMap({
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
     updateHexStyles();
     observePanelResize();
+
+    publishToStepAnalysis();
+
   }
 
   /** =========
@@ -1026,6 +1143,12 @@ export async function initSemanticMap({
     setOnMainTitleRename(fn) {
       App.onMainTitleRename = typeof fn === 'function' ? fn : null;
     },
+    pulseSelection() { publishToStepAnalysis(); },
+    getSelectionSnapshot() {
+      // 没有缓存时现算一下，保证不为 undefined
+      return App._lastSnapshot || buildSelectionSnapshot();
+    },
+
 
   };
 

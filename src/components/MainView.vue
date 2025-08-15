@@ -1,4 +1,5 @@
 <!-- src/components/MainView.vue（只展示需要改的部分） -->
+<!-- src/components/MainView.vue（只展示增量） -->
 <script setup>
 import { onMounted, onBeforeUnmount, ref, nextTick } from 'vue'
 import { initSemanticMap } from '../lib/semanticMap'
@@ -7,50 +8,72 @@ import { fetchSemanticMap, createSubspace, renameSubspace } from '../lib/api'
 const outerRef = ref(null)
 const playgroundRef = ref(null)
 const globalOverlayRef = ref(null)
-const mainTitleRef = ref(null)        // 如果有可编辑主标题
+const mainTitleRef = ref(null)
 let controller = null
-const ready = ref(false)              // 防止未就绪就点击
+const ready = ref(false)
 
 onMounted(async () => {
   await nextTick()
   if (!outerRef.value || !playgroundRef.value || !globalOverlayRef.value) return
-
   const data = await fetchSemanticMap()
   controller = await initSemanticMap({
     outerEl: outerRef.value,
     playgroundEl: playgroundRef.value,
     globalOverlayEl: globalOverlayRef.value,
-    mainTitleEl: mainTitleRef.value,           // 若你给了主标题可编辑功能
+    mainTitleEl: mainTitleRef.value,
     initialData: data
   })
-
   controller.setOnSubspaceRename(async (idx, newName) => {
     await renameSubspace(idx, newName)
   })
-
   ready.value = true
 })
 
 onBeforeUnmount(() => controller?.cleanup?.())
 
-// 点击“新增子空间”时调用
 async function onAddSubspace() {
   if (!ready.value || !controller) return
-  // 1) 让后端/状态层创建一条空子空间（可选）
-  const created = await createSubspace({})        // 若没有后端，可直接跳过这行
-  // 2) 用 semanticMap 的公开 API 插入
+  const created = await createSubspace({})
   controller.addSubspace?.(created?.subspace || { subspaceName: 'New Subspace', hexList: [] })
 }
+
+/* 点击 Save 时，打印当前选择的节点 */
+function onSave() {
+  if (!ready.value || !controller) return;
+  const snap = controller.getSelectionSnapshot?.() || { nodes: [], links: [] };
+
+  // 选中节点 id 集合（`${panelIdx}:${q},${r}`）
+  const selectedIds = new Set((snap.nodes || []).map(n => n.id));
+
+  // 端点归一化：source/target 可能是字符串，也可能是对象
+  const idOf = v => (v && typeof v === 'object' ? v.id : v);
+
+  // 筛选：只要有一端在 selectedIds 就保留
+  const touchingLinks = (snap.links || []).map(l => ({
+    ...l,
+    source: idOf(l.source),
+    target: idOf(l.target),
+  })).filter(l => selectedIds.has(l.source) || selectedIds.has(l.target));
+
+  console.groupCollapsed('[SemanticMap] Current selected');
+  console.table((snap.nodes || []).map(n => ({
+    id: n.id, panel: n.panelIdx, q: n.q, r: n.r, label: n.label || '', modality: n.modality || ''
+  })));
+  console.log('links (connected with selected node):', touchingLinks);
+  console.groupEnd();
+}
+
 </script>
 
 <template>
   <div class="mainview">
     <header class="mv-header">
-      <h2 class="mv-title" ref="mainTitleRef">Semantic Map</h2> 
+      <h2 class="mv-title" ref="mainTitleRef">Semantic Map</h2>
       <div class="mv-actions">
         <button class="add-btn" @click="onAddSubspace" title="Add subspace">＋</button>
         <button class="filter-btn" title="Filter">Filter</button>
-        <button class="save-btn" title="Save">Save</button>
+        <!-- 把 save 按钮绑上 onSave -->
+        <button class="save-btn" title="Save" @click="onSave">Save</button>
       </div>
     </header>
 
@@ -134,7 +157,5 @@ async function onAddSubspace() {
 .mv-scroller:hover {
   scrollbar-color: rgba(0,0,0,.25) transparent;
 }
-
-
 
 </style>
