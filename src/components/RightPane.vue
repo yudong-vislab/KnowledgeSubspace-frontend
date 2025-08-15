@@ -3,7 +3,7 @@
   <div class="rp-shell">
     <!-- 上部：1 份高度 -->
     <section class="rp-card">
-      <header class="rp-card__title">Step Analysis</header>
+      <header class="card__title">Step Analysis</header>
       <div class="rp-card__body">
         <!-- 你的属性面板内容 -->
       </div>
@@ -11,7 +11,7 @@
 
     <!-- 下部：2 份高度 -->
     <section class="rp-card">
-      <header class="rp-card__title">Details</header>
+      <header class="card__title">Details</header>
       <div class="rp-card__body">
         <!-- 你的详情、日志等内容 -->
       </div>
@@ -40,7 +40,7 @@
 }
 
 /* 标题行：与内容分隔清晰 */
-.rp-card__title {
+.card__title {
   font-size: 14px;
   font-weight: 600;
   color: #333;

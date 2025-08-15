@@ -63,8 +63,14 @@ html, body, #app { height: 100%; margin: 0; }
 }
 
 .send-btn{
-  width: 30px; height: 30px;
-  border:1px solid #e5e7eb; border-radius:999px; background:#111; color:#fff; cursor:pointer;
+  align-self:stretch;                 /* 高度跟随这一行 */
+  aspect-ratio:1/1;                   /* 宽=高 */
+  min-height:24px;                    /* 一行时的最小高度 */
+  border:1px solid #e5e7eb;
+  border-radius:999px;
+  background:#111; color:#fff;
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer;
 }
 .send-btn:disabled{ opacity:.4; cursor:not-allowed; }
 

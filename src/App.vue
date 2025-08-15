@@ -1,21 +1,26 @@
 <!-- src/App.vue -->
 <template>
-  <div class="app-shell">
-    <aside class="col col-left">
-      <LeftPane />
-    </aside>
+  <div class="app-container">
+    <TitleBar />
 
-    <main class="col col-center">
-      <MainView />
-    </main>
+    <div class="app-shell">
+      <aside class="col col-left">
+        <LeftPane />
+      </aside>
 
-    <aside class="col col-right">
-      <RightPane />
-    </aside>
+      <main class="col col-center">
+        <MainView />
+      </main>
+
+      <aside class="col col-right">
+        <RightPane />
+      </aside>
+    </div>
   </div>
 </template>
 
 <script setup>
+import TitleBar from './components/TitleBar.vue'
 import LeftPane from './components/LeftPane.vue'
 import MainView from './components/MainView.vue'
 import RightPane from './components/RightPane.vue'
@@ -24,36 +29,55 @@ import RightPane from './components/RightPane.vue'
 <style>
 html, body, #app { height: 100%; margin: 0; background: #f3f4f6; }
 
-.app-shell {
-  min-height: 100%;
-  display: grid;
-  grid-template-columns: 300px minmax(0,1fr) 400px; /* 左中右 */
-  grid-auto-rows: 1fr;
-  gap: 5px;                /* 左中右之间的“窄外边距” */
-  padding: 5px 5px;       /* 上下左右的页面边距（让三列上下都有留白） */
-  box-sizing: border-box;
-  align-items: stretch;     /* 让三列等高 */
+/* 固定一个 CSS 变量作为顶栏高度，方便后续统一改 */
+:root{
+  --titlebar-h: 40px;   /* 你要的“扁扁一条”高度 */
 }
 
+.app-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 关键：三栏容器高度 = 100% - 顶栏高度 */
+.app-shell {
+  height: calc(100% - var(--titlebar-h));
+  /* 也可用 flex: 1;min-height:0; 但明确 height 更稳妥 */
+  display: grid;
+  grid-template-columns: 300px minmax(0,1fr) 400px;
+  gap: 5px;
+  padding: 5px;
+  box-sizing: border-box;
+  align-items: stretch;
+  overflow: hidden;   /* 防止自身出现整体滚动条 */
+}
+
+/* 各列自己滚，不让外层滚动 */
 .col {
   background: #fff;
   border-radius: 12px;
   display: flex;
   flex-direction: column;
-  min-height: 0;   /* 允许内部元素做滚动 */
-  overflow: hidden;/* 裁剪圆角内的内容/滚动条 */
+  min-height: 0;      /* 允许子元素成为滚动容器 */
+  overflow: hidden;   /* 裁剪圆角内的滚动条 */
 }
-/* 中间列 = 滚动容器 */
-.col-center {
-  position: relative;         /* 让内部的 sticky/fixed 以它为参照 */
-  height: 100%;
-  overflow: auto;             /* 只有这里滚动 */
-  background: #fff;           /* 背景跟随高度，自适应 */
-  scrollbar-gutter: stable;   /* 预留滚动槽，不会因出现滚动条而挤开内容 */
-  /* 自动隐藏滚动条 */
-  scrollbar-width: none;                      /* Firefox */
-}
-.col-center::-webkit-scrollbar { width: 0; height: 0; } /* WebKit */
-.col-right { border-left: 1px solid #eee; background: #f3f4f6; }
-</style>
 
+/* 中间列作为内容滚动容器 */
+.col-center {
+  position: relative;
+  overflow: auto;
+  background: #fff;
+  scrollbar-width: none;
+}
+.col-center::-webkit-scrollbar { width: 0; height: 0; }
+
+.card__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+  border-bottom: 1px solid #eee;
+  padding: 8px;
+}
+
+</style>

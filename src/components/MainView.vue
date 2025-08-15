@@ -80,7 +80,7 @@ async function onAddSubspace() {
   display: flex;
   align-items: center;
   justify-content: space-between; /* 左侧标题 & 右侧按钮 */
-  padding: 8px;
+  padding: 8px 12px;
   background: #fff;     /* 固定栏底色 */
   border-bottom: 1px solid #eee;
 }
@@ -88,7 +88,7 @@ async function onAddSubspace() {
 /* 标题文字 */
 .mv-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   color: #333;
 }
