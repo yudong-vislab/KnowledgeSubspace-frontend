@@ -350,7 +350,51 @@ export async function initSemanticMap({
     div.appendChild(closeBtn);
 
     // 双击重命名（保持原逻辑）
-    title.addEventListener('dblclick', () => { /* ...保持你原来的这段... */ });
+    title.addEventListener('dblclick', (evt) => {
+      evt.stopPropagation(); // 防止冒泡到外层的双击空白逻辑
+      // 进入编辑态
+      title.setAttribute('contenteditable', 'true');
+      title.focus();
+
+      // 全选现有文本
+      const range = document.createRange();
+      range.selectNodeContents(title);
+      const sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+
+      const idx = Number(div.dataset.index || i);
+      const placeholder = `Subspace ${idx + 1}`;
+      const commit = async () => {
+        title.removeAttribute('contenteditable');
+        const newName = (title.textContent || '').trim() || placeholder;
+        title.textContent = newName;
+
+        // 同步到数据
+        if (App.currentData?.subspaces?.[idx]) {
+          App.currentData.subspaces[idx].subspaceName = newName;
+        }
+        // 对外回调（如果需要把重命名通知出去）
+        if (typeof App.onSubspaceRename === 'function') {
+          try { await App.onSubspaceRename(idx, newName); } catch (e) { console.warn(e); }
+        }
+      };
+      const cancel = () => {
+        title.removeAttribute('contenteditable');
+        // 还原旧值
+        const old = App.currentData?.subspaces?.[idx]?.subspaceName || placeholder;
+        title.textContent = old;
+      };
+
+      // 结束编辑：blur/Enter 提交，Escape 取消
+      const onBlur = () => { title.removeEventListener('keydown', onKey); commit(); };
+      const onKey = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); title.removeEventListener('blur', onBlur); commit(); }
+        if (e.key === 'Escape') { e.preventDefault(); title.removeEventListener('blur', onBlur); cancel(); }
+      };
+
+      title.addEventListener('blur', onBlur, { once: true });
+      title.addEventListener('keydown', onKey);
+    });
 
     const container = document.createElement('div');
     container.className = 'hex-container';
@@ -961,6 +1005,9 @@ export async function initSemanticMap({
     };
 
     title.addEventListener('mousedown', (e) => {
+      // 如果是双击（e.detail===2），或标题处于可编辑态，直接跳过拖拽
+      if (e.detail === 2) return;
+      if (title.isContentEditable) return;
       isDragging = true;
       startX = e.clientX; startY = e.clientY;
       origLeft = parseFloat(subspaceDiv.style.left || '0');  // 改
