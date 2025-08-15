@@ -132,6 +132,7 @@ html, body, #app { height: 100%; margin: 0; }
   justify-content: flex-start;
   user-select: none;
   z-index: 1;
+  box-sizing: border-box;
 }
 
 #playground .subspace-title {
