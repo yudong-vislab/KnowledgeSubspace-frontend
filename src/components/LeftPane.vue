@@ -110,7 +110,6 @@ function handleUploadFiles(files){
   grid-template-rows: auto 1fr 1.2fr 2fr; /* 你可以微调比例 */
   gap:6px;
   background:#f3f4f6;
-  padding:6px;            /* 外部边距（与右侧一致）*/
   box-sizing:border-box;
   overflow:hidden;
 }
