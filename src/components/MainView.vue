@@ -42,7 +42,7 @@ function onSave() {
   if (!ready.value || !controller) return
 
   // 获取带 connected:true 的快照
-  const snap = controller.getSelectionSnapshot?.({ connected: true }) || { nodes: [], links: [] }
+  const snap = controller.getSelectionSnapshot?.() || { nodes: [], links: [] }
 
   // —— 打印筛选结果 —— //
   console.groupCollapsed('[SemanticMap] Selection Snapshot')

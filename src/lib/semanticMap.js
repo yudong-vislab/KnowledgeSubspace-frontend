@@ -154,12 +154,87 @@ export async function initSemanticMap({
   /** =========
    * 小工具函数
    * ========= */
-  const keyOf = (q, r) => `${q},${r}`;
+  // const keyOf = (q, r) => `${q},${r}`;
   const pkey = (panelIdx, q, r) => `${panelIdx}|${q},${r}`; // 持久集合用的 key
 
   function panelOfPoint(p, linkDefault, fallback) {
     return (p && typeof p.panelIdx === 'number') ? p.panelIdx
          : (typeof linkDefault === 'number' ? linkDefault : fallback);
+  }
+
+  //id / key 互转
+  // node.id 形如 "panelIdx:q,r"；persistent 集合里的 key 形如 "panelIdx|q,r"
+  function idToKey(id) {
+    // 容错：若不含 ":" 则直接返回（不会被加入集合）
+    if (typeof id !== 'string' || !id.includes(':')) return id;
+    const [p, qr] = id.split(':');
+    return `${p}|${qr}`;
+  }
+  function keyOf(panelIdx, q, r) {
+    return `${panelIdx}|${q},${r}`;
+  }
+  function pointId(panelIdx, q, r) {
+    return `${panelIdx}:${q},${r}`;
+  }
+
+  // —— 解析 path 上点的 panelIdx（和前文保持一致）——
+  function resolvePanelIdxForPathPoint(p, link, i) {
+    if (typeof p.panelIdx === 'number') return p.panelIdx;
+    if (link?.type === 'flight') {
+      if (i === 0 && typeof link.panelIdxFrom === 'number') return link.panelIdxFrom;
+      if (i === (link.path?.length || 1) - 1 && typeof link.panelIdxTo === 'number') return link.panelIdxTo;
+    }
+    if (typeof link?.panelIdx === 'number') return link.panelIdx;
+    return 0;
+  }
+
+  // —— 从当前 App._lastLinks 构图：有向出边 out（按 path 顺序），以及无向邻接 undirected ——
+  // 仅保留“确实存在的 hex 节点”的边（避免脏数据）
+  function buildAdjacency(App) {
+    const out = new Map();         // id -> Set(nextId)  （有向：按 path[i] -> path[i+1]）
+    const undirected = new Map();  // id -> Set(nbId)    （无向：相邻段两端互为邻居）
+
+    const ensure = (m, id) => (m.has(id) ? m.get(id) : (m.set(id, new Set()), m.get(id)));
+
+    // 当前存在的节点集合（用来过滤）
+    const hasId = (id) => {
+      const [panelStr, qr] = (id || '').split(':');
+      const [qStr, rStr] = (qr || '').split(',');
+      const panelIdx = +panelStr, q = +qStr, r = +rStr;
+      const ok = Number.isFinite(panelIdx) && Number.isFinite(q) && Number.isFinite(r);
+      if (!ok) return false;
+      return !!App.hexMapsByPanel?.[panelIdx]?.get?.(`${q},${r}`);
+    };
+
+    for (const link of (App._lastLinks || [])) {
+      const raw = Array.isArray(link.path) ? link.path : [];
+      if (raw.length < 2) continue;
+
+      // 将 path 规范成 id 列表
+      const ids = raw.map((p, i) => {
+        const panelIdx = resolvePanelIdxForPathPoint(p, link, i);
+        return pointId(panelIdx, p.q, p.r);
+      });
+
+      for (let i = 0; i < ids.length - 1; i++) {
+        const a = ids[i], b = ids[i + 1];
+        if (!hasId(a) || !hasId(b)) continue;
+
+        // 有向：a -> b
+        ensure(out, a).add(b);
+
+        // 无向邻接：a <-> b
+        ensure(undirected, a).add(b);
+        ensure(undirected, b).add(a);
+
+        // 确保孤立端也被初始化（防后面访问 undefined）
+        ensure(out, b);
+        ensure(undirected, a);
+        ensure(undirected, b);
+      }
+    }
+
+    return { out, undirected };
   }
 
   function getConnectedHexKeys(panelIdx, q, r) {
@@ -176,6 +251,56 @@ export async function initSemanticMap({
     }
     return out;
   }
+
+  // —— 新增：构建“无向邻接表”（以 panelIdx|q,r 为 key），用于连通分量 BFS —— //
+  function buildUndirectedAdjacency() {
+    const adj = new Map(); // key -> Set<key>
+
+    const key = (panelIdx, q, r) => `${panelIdx}|${q},${r}`;
+    const ensure = (k) => {
+      if (!adj.has(k)) adj.set(k, new Set());
+      return adj.get(k);
+    };
+
+    const resolvePanelIdx = (p, link, i) => {
+      if (typeof p.panelIdx === 'number') return p.panelIdx;
+      if (link.type === 'flight') {
+        if (i === 0) {
+          return (typeof link.panelIdxFrom === 'number')
+            ? link.panelIdxFrom
+            : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+        } else {
+          return (typeof link.panelIdxTo === 'number')
+            ? link.panelIdxTo
+            : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+        }
+      }
+      return (typeof link.panelIdx === 'number') ? link.panelIdx : (p.panelIdx ?? 0);
+    };
+
+    for (const e of (App._lastLinks || [])) {
+      const path = Array.isArray(e.path) ? e.path : [];
+      if (path.length < 2) continue;
+
+      // 解析每个点的 panelIdx
+      const pts = path.map((p, i) => ({
+        panelIdx: resolvePanelIdx(p, e, i),
+        q: p.q, r: p.r
+      }));
+
+      // 连成无向边（两两相邻）
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i+1];
+        const ka = key(a.panelIdx, a.q, a.r);
+        const kb = key(b.panelIdx, b.q, b.r);
+        ensure(ka).add(kb);
+        ensure(kb).add(ka);
+      }
+    }
+
+    return adj;
+  }
+
 
   // 根据一个已选中的点，把与它 flight 相连的另一端加入邻居集合（支持跨 panel）
   function addFlightNeighbors(panelIdx, q, r) {
@@ -765,7 +890,7 @@ export async function initSemanticMap({
      * 选中/高亮样式统一更新（核心）
      * ========= */
     function updateHexStyles() {
-      // 1) 预计算“邻居合集”（对所有持久高亮的点求 road/river 邻居并求并集）
+      // 1) 仅由 “持久选中” 计算邻居合集
       App.neighborKeySet.clear();
       for (const k of App.persistentHexKeys) {
         const [panelStr, qr] = k.split('|');
@@ -773,62 +898,51 @@ export async function initSemanticMap({
         const panelIdx = +panelStr, q = +qStr, r = +rStr;
         const ns = getConnectedHexKeys(panelIdx, q, r);
         ns.forEach(hk => App.neighborKeySet.add(`${panelIdx}|${hk}`));
-        //flight 对端邻居（可能跨 panel）
+        // flight 对端邻居（可能跨 panel）
         addFlightNeighbors(panelIdx, q, r);
       }
-
-      // 如果你仍想保留“最近一次单击的点”的邻居高亮，也可以加上：
-      if (App.selectedHex) {
-        const ns2 = getConnectedHexKeys(App.selectedHex.panelIdx, App.selectedHex.q, App.selectedHex.r);
-        ns2.forEach(hk => App.neighborKeySet.add(`${App.selectedHex.panelIdx}|${hk}`));
-
-        addFlightNeighbors(App.selectedHex.panelIdx, App.selectedHex.q, App.selectedHex.r);
-      }
-
-      // 2) 应用样式
+    
+      // 2) 应用样式（保持你原来的优先级逻辑）
       App.subspaceSvgs.forEach((svg, panelIdx) => {
         svg.selectAll('g.hex').each(function(d) {
           const path = d3.select(this).select('path');
           let opacity = STYLE.OPACITY_DEFAULT;
-
+    
           const isPersistent = App.persistentHexKeys.has(pkey(panelIdx, d.q, d.r));
-
-          const isNeighbor =
-            App.neighborKeySet.has(pkey(panelIdx, d.q, d.r));
-
-          const isHovered =
+          const isNeighbor   = App.neighborKeySet.has(pkey(panelIdx, d.q, d.r));
+          const isHovered    =
             App.hoveredHex &&
             App.hoveredHex.panelIdx === panelIdx &&
             App.hoveredHex.q === d.q &&
             App.hoveredHex.r === d.r;
-
+    
           const isFlightStart =
             App.flightStart &&
             App.flightStart.panelIdx === panelIdx &&
             App.flightStart.q === d.q &&
             App.flightStart.r === d.r;
-
+    
           const isFlightHoverTarget =
             App.flightHoverTarget &&
             App.flightHoverTarget.panelIdx === panelIdx &&
             App.flightHoverTarget.q === d.q &&
             App.flightHoverTarget.r === d.r;
-
-          // 优先级：航线起点/目标/持久选中 > hover > 邻居 > 默认
+    
           if (isPersistent || isFlightStart || isFlightHoverTarget) {
-            opacity = STYLE.OPACITY_HOVER;   // or OPACITY_SELECTED
+            opacity = STYLE.OPACITY_HOVER;
           } else if (isHovered) {
-            opacity = STYLE.OPACITY_HOVER;      // 0.8
+            opacity = STYLE.OPACITY_HOVER;
           } else if (isNeighbor) {
-            opacity = STYLE.OPACITY_NEIGHBOR;   // 0.8（也可略低于 hover）
+            opacity = STYLE.OPACITY_NEIGHBOR;
           } else {
-            opacity = STYLE.OPACITY_DEFAULT;    // 0.2
+            opacity = STYLE.OPACITY_DEFAULT;
           }
-
+    
           path.attr('fill-opacity', opacity);
         });
       });
     }
+    
 
   // —— 生成保存/右侧用的快照 ——
   // 只用已“持久选中”的 hex（App.persistentHexKeys）做 nodes；
@@ -913,6 +1027,64 @@ export async function initSemanticMap({
     return { nodes, links: linksOut };
   }
 
+  // —— 通用：从一组 "panelIdx|q,r" keys 生成快照 ——
+  // 规则：nodes = 这些 key 对应的 hex；
+  //       links = _lastLinks 中 “全部 path 点都在 keySet 内”的连线（避免引入外部点）
+  function snapshotFromKeySet(keySet) {
+    if (!keySet || keySet.size === 0) return { nodes: [], links: [] };
+
+    // 1) nodes
+    const nodes = [];
+    for (const k of keySet) {
+      const [pStr, qr] = k.split('|');
+      const [qStr, rStr] = qr.split(',');
+      const panelIdx = +pStr, q = +qStr, r = +rStr;
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      if (!hex) continue;
+      nodes.push({
+        id: `${panelIdx}:${q},${r}`,
+        panelIdx, q, r,
+        label: hex.label || `${q},${r}`,
+        modality: hex.modality || ''
+      });
+    }
+
+    // 2) links：只保留 path 的每个点都在 keySet 内的连线
+    const links = [];
+    for (const e of (App._lastLinks || [])) {
+      const rawPts = Array.isArray(e.path) ? e.path : [];
+      if (rawPts.length < 2) continue;
+
+      const normPts = rawPts.map((p, i) => {
+        // 统一解析 panelIdx
+        let panelIdx = p.panelIdx;
+        if (typeof panelIdx !== 'number') {
+          if (e.type === 'flight') {
+            panelIdx = (i === 0 && typeof e.panelIdxFrom === 'number') ? e.panelIdxFrom
+                    : (i === rawPts.length - 1 && typeof e.panelIdxTo === 'number') ? e.panelIdxTo
+                    : (typeof e.panelIdx === 'number' ? e.panelIdx : 0);
+          } else {
+            panelIdx = (typeof e.panelIdx === 'number') ? e.panelIdx : 0;
+          }
+        }
+        return { panelIdx, q: p.q, r: p.r };
+      });
+
+      const allInside = normPts.every(pt => keySet.has(`${pt.panelIdx}|${pt.q},${pt.r}`));
+      if (!allInside) continue;
+
+      const a = normPts[0], b = normPts[normPts.length - 1];
+      links.push({
+        id: e.id || `${a.panelIdx}:${a.q},${a.r}->${b.panelIdx}:${b.q},${b.r}`,
+        type: e.type || 'road',
+        path: normPts.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r }))
+      });
+    }
+
+    return { nodes, links };
+  }
+
+
   // —— 基于“当前选中点”的一跳筛选：返回这些点 + 与它们直接相连的所有连线（road/river/flight）——
   function buildOneHopSnapshotFromSeeds() {
     // 1) 选种子：优先用持久集合；为空就用当前单选
@@ -987,23 +1159,48 @@ export async function initSemanticMap({
    * ========= */
   function handleSingleClick(panelIdx, q, r) {
     const k = pkey(panelIdx, q, r);
+  
+    // 已高亮：只移除此点
     if (App.persistentHexKeys.has(k)) {
-      App.persistentHexKeys.delete(k);   // 再点一次 -> 取消持久高亮
-      // 若这也是当前 selectedHex，则清掉 selectedHex
+      App.persistentHexKeys.delete(k);
       if (App.selectedHex &&
           App.selectedHex.panelIdx === panelIdx &&
           App.selectedHex.q === q &&
           App.selectedHex.r === r) {
         App.selectedHex = null;
       }
-    } else {
-      App.persistentHexKeys.add(k);      // 加入持久高亮
-      App.selectedHex = { panelIdx, q, r };
+      updateHexStyles();
+      publishToStepAnalysis();
+      return;
     }
+  
+    // 未高亮：把它所在的“无向连通分量”全部加入
+    const adj = buildUndirectedAdjacency();
+    const visited = new Set();
+    const qBFS = [k];
+    visited.add(k);
+  
+    while (qBFS.length) {
+      const cur = qBFS.shift();
+      const nbs = adj.get(cur) || new Set();
+      for (const nb of nbs) {
+        if (!visited.has(nb)) {
+          visited.add(nb);
+          qBFS.push(nb);
+        }
+      }
+    }
+  
+    // 把这个分量的所有点都点亮
+    for (const kk of visited) App.persistentHexKeys.add(kk);
+  
+    // 记一下最近点击点（可选）
+    App.selectedHex = { panelIdx, q, r };
+  
     updateHexStyles();
-    console.debug('[semanticMap] selected count =', App.persistentHexKeys.size);
-    publishToStepAnalysis(); //其他图交互
+    publishToStepAnalysis();
   }
+  
 
   function handleDoubleClick(panelIdx, q, r, event) {
     const here = { panelIdx, q, r };
@@ -1075,8 +1272,7 @@ export async function initSemanticMap({
    * 响应选择交互
    * ========= */
   function publishToStepAnalysis() {
-    App._lastSnapshot = buildSelectionSnapshot();
-    
+    App._lastSnapshot = snapshotFromKeySet(App.persistentHexKeys || new Set());
   }
 
   /** =========
@@ -1401,17 +1597,10 @@ export async function initSemanticMap({
     },
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
-      // 没有缓存时现算一下，保证不为 undefined
-      return App._lastSnapshot || buildSelectionSnapshot();
+      // 直接使用当前“持久高亮集合”生成快照
+      return snapshotFromKeySet(App.persistentHexKeys || new Set());
     },
-    getSelectionSnapshot(opts = {}) {
-      const { connected = false } = opts;
-      if (connected) {
-        return buildOneHopSnapshotFromSeeds();  // 新的一跳筛选版本
-      }
-      // 旧版本：只用持久选中点 + 全量 _lastLinks 两端端点映射
-      return App._lastSnapshot || buildSelectionSnapshot();
-    },
+    
 
   };
 
