@@ -300,6 +300,15 @@ export async function initSemanticMap({
   }
 
 
+  function safeNum(v, fallback = 0) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  function isFiniteTransform(t) {
+    return t && Number.isFinite(t.x) && Number.isFinite(t.y) && Number.isFinite(t.k);
+  }
+
+
   /** ==================
    *  DOM 构建/子空间
    *  ================== */
@@ -460,11 +469,18 @@ export async function initSemanticMap({
     const svg = App.subspaceSvgs[panelIdx];
     const overlay = App.overlaySvgs[panelIdx];
 
+    if (!svg || svg.empty()) return;           // 容错：SVG 不存在就跳过
+    if (!overlay || overlay.empty()) return;
+
     // 初始尺寸：优先来自父div实际尺寸（已在 createSubspaceElement 根据缓存设置）
     const parent = svg.node().parentNode; // .hex-container
     const pcs = getComputedStyle(parent);
-    const width  = parseFloat(pcs.width);
-    const height = parseFloat(pcs.height);
+    // 尝试多种来源拿宽高；任何一步失败都用前一步兜底
+    let width  = pcs ? safeNum(pcs.width)  : 0;
+    let height = pcs ? safeNum(pcs.height) : 0;
+    if (!width)  width  = safeNum(parent?.clientWidth,  svg.node().clientWidth || 0);
+    if (!height) height = safeNum(parent?.clientHeight, svg.node().clientHeight || 0);
+    if (!width || !height) { width = 1; height = 1; } // 最后一层兜底，避免 0/NaN
 
     svg.attr("width", width).attr("height", height);
     overlay.attr("width", width).attr("height", height);
@@ -502,9 +518,12 @@ export async function initSemanticMap({
       ).scale(1);
 
     let lastTransform =
-      savedZoom
-        ? d3.zoomIdentity.translate(savedZoom.x, savedZoom.y).scale(savedZoom.k)
-        : (App.zoomStates[panelIdx] || defaultTransform);
+    savedZoom && isFiniteTransform(savedZoom)
+      ? d3.zoomIdentity.translate(savedZoom.x, savedZoom.y).scale(savedZoom.k)
+      : (isFiniteTransform(App.zoomStates[panelIdx]) ? App.zoomStates[panelIdx] : defaultTransform);
+    if (!isFiniteTransform(lastTransform)) {
+        lastTransform = defaultTransform; // 再兜底一次
+    }
 
     // —— 如果既没有 savedZoom 也没有 runtime 的 zoom 状态，说明是第一次 ——
     // 立刻把 defaultTransform 持久化，这样以后任何重渲染都不会“重新算中心”
@@ -517,25 +536,40 @@ export async function initSemanticMap({
     }
     
     const zoom = d3.zoom()
-    .scaleExtent([0.6, 2])
-    .on("zoom", (event) => {
-      container.attr("transform", event.transform);
-      overlayG.attr("transform", event.transform);
-      App.zoomStates[panelIdx] = event.transform;
+      .scaleExtent([0.6, 2])
+      .on("zoom", (event) => {
+        const t = event?.transform;
+        if (!isFiniteTransform(t)) return;               // ← 关键：丢弃非法事件
+        container.attr("transform", t);
+        overlayG.attr("transform", t);
+        App.zoomStates[panelIdx] = t;
 
-      // 新增：把缩放也持久化
-      App.panelStates[panelIdx] = {
-        ...(App.panelStates[panelIdx] || {}),
-        zoom: { k: event.transform.k, x: event.transform.x, y: event.transform.y }
-      };
+        // 同步持久化
+        const z = { k: t.k, x: t.x, y: t.y };
+        if (isFiniteTransform(z)) {
+          App.panelStates[panelIdx] = { ...(App.panelStates[panelIdx] || {}), zoom: z };
+        }
 
-      if (App._lastLinks) {
-        drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
-      }
-      updateHexStyles();
-    });
-    svg.call(zoom).on("dblclick.zoom", null);
-    svg.call(zoom.transform, lastTransform); // 只此一次，避免重复
+        if (App._lastLinks) {
+          drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+        }
+        updateHexStyles();
+      });
+
+    svg.on("dblclick.zoom", null).call(zoom);
+    const applyTransform = (t) => {
+      if (!isFiniteTransform(t)) return;
+      container.attr("transform", t);
+      overlayG.attr("transform", t);
+      svg.call(zoom.transform, t);
+    };
+
+    if (isFiniteTransform(lastTransform)) {
+      applyTransform(lastTransform);
+    } else {
+      // 有些情况下（容器刚插入/尚未布局），一帧后尺寸就稳定了
+      requestAnimationFrame(() => applyTransform(defaultTransform));
+    }
 
     // 绑定 hex
     const sel = container.selectAll("g.hex")
@@ -799,61 +833,154 @@ export async function initSemanticMap({
   // —— 生成保存/右侧用的快照 ——
   // 只用已“持久选中”的 hex（App.persistentHexKeys）做 nodes；
   // links 来自 App._lastLinks，但会把 panelIdx 解析正确。
+  // —— 新的：基于当前“持久选中”的点，取到所有与之相连的路径点和对应连线 —— //
   function buildSelectionSnapshot() {
-    const nodes = [];
-    const links = [];
+    // 选中种子集合（panelIdx|q,r）
+    const selectedKeys = new Set(App.persistentHexKeys || []);
 
-    // nodes：来自持久集合
-    for (const k of App.persistentHexKeys) {
-      const [panelIdxStr, qr] = k.split('|');
-      const [qStr, rStr] = qr.split(',');
-      const panelIdx = +panelIdxStr, q = +qStr, r = +rStr;
-      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
-      if (hex) {
-        nodes.push({
-          id: `${panelIdx}:${q},${r}`,
-          label: hex.label || `${q},${r}`,
-          modality: hex.modality || '',
-          panelIdx, q, r
+    // 如果什么都没选，也要返回一个空快照，避免报错
+    if (!selectedKeys.size) {
+      return { nodes: [], links: [] };
+    }
+
+    // 收集到的节点 key（包含选中 + 由连接扩展出来的）
+    const nodeKeySet = new Set(selectedKeys);
+    const linksOut = [];
+
+    // 小工具：规范化一个点的 panelIdx（兼容 link 上的 panelIdxFrom/To 或 panelIdx）
+    const resolvePanelIdx = (p, link, i) => {
+      if (typeof p.panelIdx === 'number') return p.panelIdx;
+      if (link.type === 'flight') {
+        // flight 两端可在不同 panel
+        if (i === 0) {
+          return (typeof link.panelIdxFrom === 'number')
+            ? link.panelIdxFrom
+            : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+        } else {
+          return (typeof link.panelIdxTo === 'number')
+            ? link.panelIdxTo
+            : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+        }
+      }
+      // road/river：通常整条线在同一 panel
+      return (typeof link.panelIdx === 'number') ? link.panelIdx : (p.panelIdx ?? 0);
+    };
+
+    // 规范化 path（加上 panelIdx），并判断是否“与选中相连”
+    const touchesSelection = (pts) =>
+      pts.some(pt => selectedKeys.has(`${pt.panelIdx}|${pt.q},${pt.r}`));
+
+    for (const e of App._lastLinks || []) {
+      const rawPts = e.path || [];
+      if (!rawPts.length) continue;
+
+      // 解决每个点的 panelIdx
+      const normPts = rawPts.map((p, i) => ({
+        panelIdx: resolvePanelIdx(p, e, i),
+        q: p.q, r: p.r
+      }));
+
+      // 如果这条连线任意一点与“选中集合”相连，则整条连线纳入
+      if (touchesSelection(normPts)) {
+        // 累计所有路径点到节点集合
+        normPts.forEach(pt => nodeKeySet.add(`${pt.panelIdx}|${pt.q},${pt.r}`));
+
+        // 链路对象：保留 type + 规范化后的 path（这样右侧需要画小预览也好处理）
+        const a = normPts[0], b = normPts[normPts.length - 1];
+        linksOut.push({
+          id: e.id || `${a.panelIdx}:${a.q},${a.r}->${b.panelIdx}:${b.q},${b.r}`,
+          type: e.type || 'road',
+          path: normPts.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r }))
         });
       }
     }
 
-    // links：来自 _lastLinks，稳健解析 panelIdx
-    for (const e of App._lastLinks || []) {
-      if (!e.path || e.path.length < 2) continue;
-
-      const a = e.path[0];
-      const b = e.path[e.path.length - 1];
-
-      // 解析每个端点的 panelIdx：优先点上携带，其次链路级 panelIdx，
-      // 再次 flight 的 panelIdxFrom/To（兼容双端面板不同）
-      const aPanel = (typeof a.panelIdx === 'number')
-        ? a.panelIdx
-        : (typeof e.panelIdx === 'number')
-          ? e.panelIdx
-          : (typeof e.panelIdxFrom === 'number' ? e.panelIdxFrom : 0);
-
-      const bPanel = (typeof b.panelIdx === 'number')
-        ? b.panelIdx
-        : (typeof e.panelIdx === 'number')
-          ? e.panelIdx
-          : (typeof e.panelIdxTo === 'number' ? e.panelIdxTo : 0);
-
-      const sid = `${aPanel}:${a.q},${a.r}`;
-      const tid = `${bPanel}:${b.q},${b.r}`;
-
-      links.push({
-        id: e.id || `${sid}->${tid}`,
-        source: sid,
-        target: tid,
-        type: e.type || 'road',
-        weight: e.weight
+    // 最终 nodes：把 nodeKeySet 里的每个点做成结构化节点，尽量带上 label/modality
+    const nodes = [];
+    for (const k of nodeKeySet) {
+      const [pStr, qr] = k.split('|');
+      const [qStr, rStr] = qr.split(',');
+      const panelIdx = +pStr, q = +qStr, r = +rStr;
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      nodes.push({
+        id: `${panelIdx}:${q},${r}`,
+        panelIdx, q, r,
+        label: hex?.label || `${q},${r}`,
+        modality: hex?.modality || ''
       });
     }
 
-    return { nodes, links };
+    return { nodes, links: linksOut };
   }
+
+  // —— 基于“当前选中点”的一跳筛选：返回这些点 + 与它们直接相连的所有连线（road/river/flight）——
+  function buildOneHopSnapshotFromSeeds() {
+    // 1) 选种子：优先用持久集合；为空就用当前单选
+    const seedSet = new Set(App.persistentHexKeys);
+    if (seedSet.size === 0 && App.selectedHex) {
+      seedSet.add(`${App.selectedHex.panelIdx}|${App.selectedHex.q},${App.selectedHex.r}`);
+    }
+    if (seedSet.size === 0) {
+      // 没选中任何点 -> 返回空
+      return { nodes: [], links: [] };
+    }
+
+    // 工具：把 (panelIdx,q,r) 变成和 seedSet 一致的 key
+    const kOf = (panelIdx, q, r) => `${panelIdx}|${q},${r}`;
+    const addIfHex = (accSet, panelIdx, q, r) => {
+      if (typeof panelIdx === 'number' && Number.isFinite(q) && Number.isFinite(r)) {
+        accSet.add(kOf(panelIdx, q, r));
+      }
+    };
+
+    // 2) 扫描所有连线，挑出“与任一 seed 同在一条 path 上”的连线
+    const pickedLinks = [];
+    const neighborKeySet = new Set(); // 与种子直接相连的一跳点（包含种子本身）
+
+    for (const link of (App._lastLinks || [])) {
+      const copy = JSON.parse(JSON.stringify(link)); // 深拷贝一份作为输出
+
+      // 把 path 里所有点的 panelIdx 解析到位，方便判断
+      const pathPoints = (copy.path || []).map((p, i) => {
+        const panelIdx =
+          (typeof p.panelIdx === 'number') ? p.panelIdx
+            : (i === 0 && typeof copy.panelIdxFrom === 'number') ? copy.panelIdxFrom
+            : (i === copy.path.length - 1 && typeof copy.panelIdxTo === 'number') ? copy.panelIdxTo
+            : (typeof copy.panelIdx === 'number') ? copy.panelIdx
+            : 0;
+        return { panelIdx, q: p.q, r: p.r };
+      });
+
+      // 这条连线的 path 是否包含 seed？
+      const touchesSeed = pathPoints.some(pt => seedSet.has(kOf(pt.panelIdx, pt.q, pt.r)));
+      if (!touchesSeed) continue; // 严格一跳：仅保留包含种子的连线
+
+      // 收集：这条连线上的所有端点 + 种子，形成“一跳范围内”的节点集合
+      pathPoints.forEach(pt => addIfHex(neighborKeySet, pt.panelIdx, pt.q, pt.r));
+
+      pickedLinks.push(copy); // 完整连线对象
+    }
+
+    // 3) 生成 nodes：只取“一跳范围内”的点（从 hexMaps 拿 label/modality）
+    const nodes = [];
+    for (const key of neighborKeySet) {
+      const [pStr, qr] = key.split('|');
+      const [qStr, rStr] = qr.split(',');
+      const panelIdx = +pStr, q = +qStr, r = +rStr;
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      if (!hex) continue;
+      nodes.push({
+        id: `${panelIdx}:${q},${r}`,
+        label: hex.label || `${q},${r}`,
+        modality: hex.modality || '',
+        panelIdx, q, r
+      });
+    }
+
+    // 4) 返回“具体的连线对象 + 一跳内节点”
+    return { nodes, links: pickedLinks };
+  }
+
 
   /** =========
    * 单/双击处理
@@ -1277,7 +1404,14 @@ export async function initSemanticMap({
       // 没有缓存时现算一下，保证不为 undefined
       return App._lastSnapshot || buildSelectionSnapshot();
     },
-
+    getSelectionSnapshot(opts = {}) {
+      const { connected = false } = opts;
+      if (connected) {
+        return buildOneHopSnapshotFromSeeds();  // 新的一跳筛选版本
+      }
+      // 旧版本：只用持久选中点 + 全量 _lastLinks 两端端点映射
+      return App._lastSnapshot || buildSelectionSnapshot();
+    },
 
   };
 

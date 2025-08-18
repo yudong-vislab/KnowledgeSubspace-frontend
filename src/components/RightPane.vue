@@ -13,15 +13,16 @@
             @blur="finishEditTitle(i, $event)"
             @keydown="onTitleKey(i, $event)"
             :contenteditable="editingIdx === i ? 'plaintext-only' : 'false'"
-            :title="editingIdx === i ? 'Enter to Save，Esc to Cancel' : 'Double click to'"
+            :title="editingIdx === i ? 'Enter to Save，Esc to Cancel' : 'Double click to Edit'"
           >
             {{ step.title || defaultTitle(step, i) }}
           </div>
 
           <!-- 2) Hex 概览（预留：节点/连线统计或小预览） -->
           <div class="step__hex">
-            <div class="mini-line">Nodes: {{ step.nodes?.length || 0 }}</div>
-            <div class="mini-line">Links: {{ step.links?.length || 0 }}</div>
+            <div class="mini-line">Nodes: {{ step.nodes?.length || 0 }}, Links: {{ step.links?.length || 0 }}</div>
+            <RelationGraph class="relg" :data="{ nodes: step.nodes, links: step.links }" />
+
           </div>
 
           <!-- 3) 原文句子（预留占位） -->
@@ -42,6 +43,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { onSelectionSaved } from '../lib/selectionBus'
+import RelationGraph from './RelationGraph.vue'
 
 
 const steps = ref([])        // 保存的步骤栈
@@ -170,4 +172,14 @@ function onTitleKey(i, evt) {
 
 .mini-line{ font-size:12px; color:#6b7280; }
 .placeholder{ color:#9ca3af; font-size:12px; }
+
+.step__hex{
+  border:1px dashed #e5e7eb; border-radius:8px; padding:8px; 
+  /* 给可视化留固定高度（你可以根据需要调） */
+  height:160px; 
+  position: relative;            /* 让内部 100% 高度生效 */
+  overflow: hidden;
+}
+.relg{ width:100%; height:100%; display:block; }
+
 </style>

@@ -40,25 +40,20 @@ async function onAddSubspace() {
 /* 点击 Save 时，打印当前选择的节点 */
 function onSave() {
   if (!ready.value || !controller) return
-  const snap = controller.getSelectionSnapshot?.() || { nodes: [], links: [] }
 
-  // 仍然可以打印
-  const rows = (snap.nodes || []).map(n => ({
-    id: n.id,
-    panel: n.panelIdx,
-    q: n.q,
-    r: n.r,
-    label: n.label || '',
-    modality: n.modality || ''
-  }))
+  // 获取带 connected:true 的快照
+  const snap = controller.getSelectionSnapshot?.({ connected: true }) || { nodes: [], links: [] }
+
+  // —— 打印筛选结果 —— //
   console.groupCollapsed('[SemanticMap] Selection Snapshot')
-  console.table(rows)
-  console.log('links count:', (snap.links || []).length)
+  console.log('nodes:', snap.nodes)
+  console.log('links:', snap.links)
   console.groupEnd()
 
-  // —— 新增：把这次保存广播给右侧 —— //
+  // —— 广播给右侧 —— //
   emitSelectionSaved(snap)
 }
+
 
 </script>
 
