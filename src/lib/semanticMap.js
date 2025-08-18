@@ -1005,6 +1005,7 @@ export async function initSemanticMap({
     };
 
     title.addEventListener('mousedown', (e) => {
+      
       // 如果是双击（e.detail===2），或标题处于可编辑态，直接跳过拖拽
       if (e.detail === 2) return;
       if (title.isContentEditable) return;
