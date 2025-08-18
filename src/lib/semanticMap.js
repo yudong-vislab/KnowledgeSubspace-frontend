@@ -1,6 +1,6 @@
 // src/lib/semanticMap.js
 import * as d3 from 'd3';
-// import { emitSelection } from './selectionBus'
+import { emitSelection } from './selectionBus'
 
 /** =========================
  *  可配置样式与常量（集中声明）
@@ -351,9 +351,12 @@ export async function initSemanticMap({
 
     // 双击重命名（保持原逻辑）
     title.addEventListener('dblclick', (evt) => {
-      evt.stopPropagation(); // 防止冒泡到外层的双击空白逻辑
-      // 进入编辑态
-      title.setAttribute('contenteditable', 'true');
+      evt.stopPropagation(); // 避免冒泡到空白双击逻辑
+      const idx = Number(div.dataset.index || i);
+      const placeholder = `Subspace ${idx + 1}`;
+
+      // 进入编辑态：使用 plaintext-only 以匹配 RightPane 样式
+      title.setAttribute('contenteditable', 'plaintext-only');
       title.focus();
 
       // 全选现有文本
@@ -362,31 +365,42 @@ export async function initSemanticMap({
       const sel = window.getSelection();
       sel.removeAllRanges(); sel.addRange(range);
 
-      const idx = Number(div.dataset.index || i);
-      const placeholder = `Subspace ${idx + 1}`;
       const commit = async () => {
-        title.removeAttribute('contenteditable');
+        // 读取并清理编辑态
         const newName = (title.textContent || '').trim() || placeholder;
         title.textContent = newName;
+        title.removeAttribute('contenteditable');
 
-        // 同步到数据
+        // 同步数据
         if (App.currentData?.subspaces?.[idx]) {
           App.currentData.subspaces[idx].subspaceName = newName;
         }
-        // 对外回调（如果需要把重命名通知出去）
         if (typeof App.onSubspaceRename === 'function') {
           try { await App.onSubspaceRename(idx, newName); } catch (e) { console.warn(e); }
         }
+
+        // 标题高度可能变化：更新容器高度扣减
+        const th = title.offsetHeight || 0;
+        const container = div.querySelector('.hex-container');
+        if (container) container.style.height = `calc(100% - ${th}px)`;
       };
+
       const cancel = () => {
         title.removeAttribute('contenteditable');
-        // 还原旧值
         const old = App.currentData?.subspaces?.[idx]?.subspaceName || placeholder;
         title.textContent = old;
+
+        // 同步一次容器高度
+        const th = title.offsetHeight || 0;
+        const container = div.querySelector('.hex-container');
+        if (container) container.style.height = `calc(100% - ${th}px)`;
       };
 
       // 结束编辑：blur/Enter 提交，Escape 取消
-      const onBlur = () => { title.removeEventListener('keydown', onKey); commit(); };
+      const onBlur = () => {
+        title.removeEventListener('keydown', onKey);
+        commit();
+      };
       const onKey = (e) => {
         if (e.key === 'Enter') { e.preventDefault(); title.removeEventListener('blur', onBlur); commit(); }
         if (e.key === 'Escape') { e.preventDefault(); title.removeEventListener('blur', onBlur); cancel(); }
@@ -395,7 +409,7 @@ export async function initSemanticMap({
       title.addEventListener('blur', onBlur, { once: true });
       title.addEventListener('keydown', onKey);
     });
-
+    
     const container = document.createElement('div');
     container.className = 'hex-container';
     container.style.position = 'relative';
@@ -935,6 +949,7 @@ export async function initSemanticMap({
    * ========= */
   function publishToStepAnalysis() {
     App._lastSnapshot = buildSelectionSnapshot();
+    
   }
 
   /** =========
@@ -1005,7 +1020,7 @@ export async function initSemanticMap({
     };
 
     title.addEventListener('mousedown', (e) => {
-      
+
       // 如果是双击（e.detail===2），或标题处于可编辑态，直接跳过拖拽
       if (e.detail === 2) return;
       if (title.isContentEditable) return;

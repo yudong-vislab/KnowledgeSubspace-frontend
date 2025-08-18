@@ -1,9 +1,9 @@
 <!-- src/components/MainView.vue（只展示需要改的部分） -->
-<!-- src/components/MainView.vue（只展示增量） -->
 <script setup>
 import { onMounted, onBeforeUnmount, ref, nextTick } from 'vue'
 import { initSemanticMap } from '../lib/semanticMap'
 import { fetchSemanticMap, createSubspace, renameSubspace } from '../lib/api'
+import { emitSelectionSaved } from '../lib/selectionBus'
 
 const outerRef = ref(null)
 const playgroundRef = ref(null)
@@ -39,28 +39,25 @@ async function onAddSubspace() {
 
 /* 点击 Save 时，打印当前选择的节点 */
 function onSave() {
-  if (!ready.value || !controller) return;
-  const snap = controller.getSelectionSnapshot?.() || { nodes: [], links: [] };
+  if (!ready.value || !controller) return
+  const snap = controller.getSelectionSnapshot?.() || { nodes: [], links: [] }
 
-  // 选中节点 id 集合（`${panelIdx}:${q},${r}`）
-  const selectedIds = new Set((snap.nodes || []).map(n => n.id));
+  // 仍然可以打印
+  const rows = (snap.nodes || []).map(n => ({
+    id: n.id,
+    panel: n.panelIdx,
+    q: n.q,
+    r: n.r,
+    label: n.label || '',
+    modality: n.modality || ''
+  }))
+  console.groupCollapsed('[SemanticMap] Selection Snapshot')
+  console.table(rows)
+  console.log('links count:', (snap.links || []).length)
+  console.groupEnd()
 
-  // 端点归一化：source/target 可能是字符串，也可能是对象
-  const idOf = v => (v && typeof v === 'object' ? v.id : v);
-
-  // 筛选：只要有一端在 selectedIds 就保留
-  const touchingLinks = (snap.links || []).map(l => ({
-    ...l,
-    source: idOf(l.source),
-    target: idOf(l.target),
-  })).filter(l => selectedIds.has(l.source) || selectedIds.has(l.target));
-
-  console.groupCollapsed('[SemanticMap] Current selected');
-  console.table((snap.nodes || []).map(n => ({
-    id: n.id, panel: n.panelIdx, q: n.q, r: n.r, label: n.label || '', modality: n.modality || ''
-  })));
-  console.log('links (connected with selected node):', touchingLinks);
-  console.groupEnd();
+  // —— 新增：把这次保存广播给右侧 —— //
+  emitSelectionSaved(snap)
 }
 
 </script>
@@ -68,7 +65,7 @@ function onSave() {
 <template>
   <div class="mainview">
     <header class="mv-header">
-      <h2 class="mv-title" ref="mainTitleRef">Semantic Map</h2>
+      <h2 class="mv-title editable-title" ref="mainTitleRef">Semantic Map</h2>
       <div class="mv-actions">
         <button class="add-btn" @click="onAddSubspace" title="Add subspace">＋</button>
         <button class="filter-btn" title="Filter">Filter</button>
@@ -157,5 +154,7 @@ function onSave() {
 .mv-scroller:hover {
   scrollbar-color: rgba(0,0,0,.25) transparent;
 }
+
+
 
 </style>

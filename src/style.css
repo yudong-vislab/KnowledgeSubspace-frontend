@@ -135,17 +135,38 @@ html, body, #app { height: 100%; margin: 0; }
   box-sizing: border-box;
 }
 
+/* —— 子空间标题：默认作为拖拽手柄 —— */
 #playground .subspace-title {
-  cursor: move;
-  font-size: 14px;
+  cursor: move;                 /* 只有非编辑态才当手柄 */
+  font-size: 16px;              /* 保持你原字号不变 */
   color: #666;
   text-align: center;
   margin: 5px 0 2px 0;
   pointer-events: auto;
-  user-select: none;
+  user-select: none;            /* 非编辑态不允许选中文本，避免误选 */
   position: relative;
   z-index: 20;
+  padding: 6px 8px;             /* 给一点内边距，让编辑态好看些 */
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  background: transparent;
+  transition: background-color .12s ease, border-color .12s ease;
 }
+
+/* —— 编辑态：与 RightPane 的标题编辑效果保持一致 —— */
+#playground .subspace-title[contenteditable="plaintext-only"] {
+  cursor: text;                 /* 文本光标 */
+  user-select: text;            /* 允许选择文本 */
+  outline: none;
+  background: #eef2ff;          /* 淡蓝底 */
+  border-color: #c7d2fe;        /* 虚线边框显色 */
+}
+
+/* （可选）编辑态悬停更明显一点 */
+#playground .subspace-title[contenteditable="plaintext-only"]:hover {
+  border-color: #a5b4fc;
+}
+
 
 #playground .hex-container {
   position: relative;
@@ -176,13 +197,15 @@ html, body, #app { height: 100%; margin: 0; }
 /* 子空间右上角删除按钮（hover 变深红） */
 .subspace-close {
   position: absolute;
-  top: 4px;
+  top: 6px;
   right: 8px;
+  padding:6px 8px; 
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  margin: 5px 0 2px 0;
+  width: 18px;
+  height: 18px;
   border: 1px solid #ddd;
   border-radius: 999px;
   background: #fff;
