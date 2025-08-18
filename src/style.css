@@ -229,4 +229,3 @@ html, body, #app { height: 100%; margin: 0; }
 /* Firefox */
 .scroll-auto-hide { scrollbar-width: thin; scrollbar-color: transparent transparent; }
 .scroll-auto-hide:hover { scrollbar-color: rgba(0,0,0,.25) transparent; }
-

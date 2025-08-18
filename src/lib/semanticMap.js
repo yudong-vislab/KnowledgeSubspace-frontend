@@ -1,6 +1,6 @@
 // src/lib/semanticMap.js
 import * as d3 from 'd3';
-import { emitSelection } from './selectionBus'
+// import { emitSelection } from './selectionBus'
 
 /** =========================
  *  可配置样式与常量（集中声明）
@@ -409,7 +409,7 @@ export async function initSemanticMap({
       title.addEventListener('blur', onBlur, { once: true });
       title.addEventListener('keydown', onKey);
     });
-    
+
     const container = document.createElement('div');
     container.className = 'hex-container';
     container.style.position = 'relative';

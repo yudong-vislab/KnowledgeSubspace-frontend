@@ -13,7 +13,7 @@
             @blur="finishEditTitle(i, $event)"
             @keydown="onTitleKey(i, $event)"
             :contenteditable="editingIdx === i ? 'plaintext-only' : 'false'"
-            :title="editingIdx === i ? '按 Enter 保存，Esc 取消' : '双击编辑标题'"
+            :title="editingIdx === i ? 'Enter to Save，Esc to Cancel' : 'Double click to'"
           >
             {{ step.title || defaultTitle(step, i) }}
           </div>
