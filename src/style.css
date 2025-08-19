@@ -43,7 +43,7 @@ html, body, #app { height: 100%; margin: 0; }
 }
 
 /* 按钮——保持始终居中，无需调行高 */
-.add-btn,.filter-btn,.save-btn,.tool-btn {
+.add-btn,.filter-btn,.save-btn,.tool-btn, .select-btn, .clear-btn {
   display: inline-flex;        /* 用 flex 居中 */
   align-items: center;
   justify-content: center;
@@ -58,7 +58,7 @@ html, body, #app { height: 100%; margin: 0; }
   box-shadow: 0 1px 1px rgba(0,0,0,.08);
 }
 .add-btn:hover,
-.filter-btn:hover,.save-btn:hover,.tool-btn:hover {
+.filter-btn:hover,.save-btn:hover,.tool-btn:hover, .select-btn:hover, .clear-btn:hover {
   background: #f7f7f7;
 }
 
