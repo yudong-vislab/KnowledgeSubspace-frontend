@@ -24,6 +24,7 @@ const STYLE = {
   CITY_RADIUS: 3.5,
   CITY_BORDER_WIDTH: 1.2,
   CITY_FILL: '#ffffff',
+  CAPITALFILL: "#000",
   CITY_BORDER_COLOR: '#777777',
 
   // 航线（flight）样式
@@ -97,6 +98,7 @@ export async function initSemanticMap({
         radius: STYLE.CITY_RADIUS,
         borderWidth: STYLE.CITY_BORDER_WIDTH,
         fill: STYLE.CITY_FILL,
+        capitalfill: STYLE.CAPITALFILL,
         borderColor: STYLE.CITY_BORDER_COLOR,
         zIndex: 3,
       },
@@ -939,7 +941,8 @@ export async function initSemanticMap({
             .style('pointer-events', 'none');
         } else if (count >= 2) {
           // 首都（≥2 条起点）: 外圈 + 内实心圆（都白填充，灰描边）
-          const outerR = baseR * 1.6;
+          const outerR = baseR * 1.4;
+          const interR = baseR * 0.8
         
           // 外圆
           gCities.append('circle')
@@ -953,8 +956,8 @@ export async function initSemanticMap({
           // 内圈
           gCities.append('circle')
             .attr('cx', xy[0]).attr('cy', xy[1])
-            .attr('r', baseR)
-            .attr('fill', App.config.city.fill)
+            .attr('r', interR)
+            .attr('fill', App.config.city.capitalfill)
             .attr('stroke', App.config.city.borderColor)
             .attr('stroke-width', App.config.city.borderWidth)
             .attr('vector-effect', 'non-scaling-stroke')
