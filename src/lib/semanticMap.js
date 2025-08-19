@@ -7,7 +7,7 @@ import * as d3 from 'd3';
  *  ========================= */
 const STYLE = {
   // hex 尺寸与默认外观
-  HEX_RADIUS: 15,
+  HEX_RADIUS: 16,
   HEX_BORDER_WIDTH: 1.2,
   HEX_BORDER_COLOR: '#ffffff',
   HEX_FILL_TEXT: '#a9d08d',
@@ -21,8 +21,8 @@ const STYLE = {
   OPACITY_NEIGHBOR: 0.8, // 选中点的 road/river 邻居
 
   // city 小圆点（如果有）
-  CITY_RADIUS: 3,
-  CITY_BORDER_WIDTH: 1,
+  CITY_RADIUS: 3.5,
+  CITY_BORDER_WIDTH: 1.2,
   CITY_FILL: '#ffffff',
   CITY_BORDER_COLOR: '#777777',
 
@@ -560,8 +560,11 @@ export async function initSemanticMap({
     container.appendChild(overlay);
 
     const overlayD3 = d3.select(overlay);
-    if (overlayD3.select('g').empty()) overlayD3.append('g');
-
+    if (overlayD3.select('g.overlay-root').empty()) {
+      const root = overlayD3.append('g').attr('class', 'overlay-root');
+      root.append('g').attr('class', 'links');
+      root.append('g').attr('class', 'cities');
+    }
     div.appendChild(container);
     App.playgroundEl.appendChild(div);
 
@@ -597,6 +600,10 @@ export async function initSemanticMap({
     if (!svg || svg.empty()) return;           // 容错：SVG 不存在就跳过
     if (!overlay || overlay.empty()) return;
 
+    const overlayRoot = overlay.select('g.overlay-root');          // ← 根层
+    const overlayLinks = overlayRoot.select('g.links');            // ← 线层
+    const overlayCities = overlayRoot.select('g.cities');          // ← city 层
+
     // 初始尺寸：优先来自父div实际尺寸（已在 createSubspaceElement 根据缓存设置）
     const parent = svg.node().parentNode; // .hex-container
     const pcs = getComputedStyle(parent);
@@ -612,8 +619,7 @@ export async function initSemanticMap({
 
     let container = svg.select("g");
     if (container.empty()) container = svg.append("g");
-    let overlayG = overlay.select("g");
-    if (overlayG.empty()) overlayG = overlay.append("g");
+    // overlay 的层次已经在 createSubspaceElement 里创建，这里不再 append
 
     const rawHexList = (space.hexList || []).map(h => {
       const x = (3/4) * 2 * hexRadius * h.q;
@@ -666,7 +672,7 @@ export async function initSemanticMap({
         const t = event?.transform;
         if (!isFiniteTransform(t)) return;               // ← 关键：丢弃非法事件
         container.attr("transform", t);
-        overlayG.attr("transform", t);
+        overlayRoot.attr("transform", t);
         App.zoomStates[panelIdx] = t;
 
         // 同步持久化
@@ -685,7 +691,7 @@ export async function initSemanticMap({
     const applyTransform = (t) => {
       if (!isFiniteTransform(t)) return;
       container.attr("transform", t);
-      overlayG.attr("transform", t);
+      overlayRoot.attr("transform", t);
       svg.call(zoom.transform, t);
     };
 
@@ -801,70 +807,183 @@ export async function initSemanticMap({
    * 航线与 overlay
    * ========= */
   function drawOverlayLinesFromLinks(links, allHexDataByPanel, hexMapsByPanel, showTempFlight=false) {
-    App.overlaySvgs.forEach(overlaySvg => overlaySvg.select("g").selectAll("polyline, line, path").remove());
-    d3.select(App.globalOverlayEl).selectAll("polyline, line, path").remove();
+    // 先清空每个 panel 的 overlay-root 下的两层
+    App.overlaySvgs.forEach(overlaySvg => {
+      const root = overlaySvg.select('g.overlay-root');
+      root.select('g.links').selectAll('*').remove();   // road/river 在这里画
+      root.select('g.cities').selectAll('*').remove();  // 城市/首都在这里画
+    });
 
-    links.forEach(link => {
-      if (link.type === "flight") {
-        const style = App.config.flight;
-        const points = link.path.map((p, i) => {
-          const panelIdx = p.panelIdx ?? (i === 0 ? link.panelIdxFrom : link.panelIdxTo) ?? link.panelIdx ?? 0;
-          return getHexGlobalXY(panelIdx, p.q, p.r);
-        }).filter(Boolean);
+    // 全局 overlay（仅用来画 flight 曲线）
+    const gGlobal = d3.select(App.globalOverlayEl);
+    if (gGlobal.select('g.overlay-root').empty()) {
+      const root = gGlobal.append('g').attr('class', 'overlay-root');
+      root.append('g').attr('class', 'links');   // flight 曲线层
+      root.append('g').attr('class', 'cities');  // 预留，不用来画城市
+    }
+    const gGlobalRoot  = gGlobal.select('g.overlay-root');
+    const gGlobalLines = gGlobalRoot.select('g.links');
+    gGlobalLines.selectAll('*').remove();
 
-        const allRects = link.path.map((p, i) => {
-          const panelIdx = p.panelIdx ?? (i === 0 ? link.panelIdxFrom : link.panelIdxTo) ?? link.panelIdx ?? 0;
-          return getPanelRect(panelIdx);
-        });
-        const allInRect = points.every((pt, i) => pt && pointInRect(pt[0], pt[1], allRects[i]));
-        if (!allInRect) return;
+    // 样式帮助
+    const styleOf = (t) => (t === 'flight' ? App.config.flight
+                          : t === 'river'  ? App.config.river
+                                          : App.config.road);
 
-        if (points.length === 2) {
-          const [p0, p1] = points;
-          const dx = p1[0] - p0[0];
-          const dy = p1[1] - p0[1];
-          const mx = (p0[0] + p1[0]) / 2;
-          const my = (p0[1] + p1[1]) / 2;
-          const curveOffset = Math.sign(dx) * style.controlCurveRatio * Math.sqrt(dx*dx + dy*dy);
-          const c1x = mx + curveOffset;
-          const c1y = my - curveOffset;
-          d3.select(App.globalOverlayEl).append("path")
-            .attr("d", `M${p0[0]},${p0[1]} Q${c1x},${c1y} ${p1[0]},${p1[1]}`)
-            .attr("stroke", style.color)
-            .attr("stroke-width", style.width)
-            .attr("stroke-opacity", style.opacity)
-            .attr("fill", "none")
-            .attr("stroke-dasharray", style.dash || null);
-        }
+    const getLocalXY = (panelIdx, q, r) => {
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      return hex ? [hex.x, hex.y] : null;
+    };
+
+    const resolvePanelIdx = (p, link, i) => {
+      if (typeof p.panelIdx === 'number') return p.panelIdx;
+      if (link.type === 'flight') {
+        if (i === 0)  return (typeof link.panelIdxFrom === 'number') ? link.panelIdxFrom
+                      : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+        else          return (typeof link.panelIdxTo   === 'number') ? link.panelIdxTo
+                      : (typeof link.panelIdx === 'number' ? link.panelIdx : 0);
+      }
+      return (typeof link.panelIdx === 'number') ? link.panelIdx : 0;
+    };
+
+    // —— 统计每个 panel 上“起点计数” —— //
+    // city: 某点作为起点出现 1 次；capital: ≥2 次
+    // 结构：panelIdx -> Map<'q,r', count>
+    const startCountPerPanel = new Map();
+    const ensureCountMap = (pIdx) => {
+      if (!startCountPerPanel.has(pIdx)) startCountPerPanel.set(pIdx, new Map());
+      return startCountPerPanel.get(pIdx);
+    };
+    const bump = (pIdx, q, r) => {
+      const m = ensureCountMap(pIdx);
+      const k = `${q},${r}`;
+      m.set(k, (m.get(k) || 0) + 1);
+    };
+
+    // —— 先把 road/river 画到各自 panel（低层）；flight 只记录，最后统一画（最高层） —— //
+    const flightsToDraw = []; // [{p0:[x,y], p1:[x,y], style}]
+
+    (links || []).forEach(link => {
+      const type  = link.type || 'road';
+      const style = styleOf(type);
+
+      // 规范 path
+      const pts = (link.path || []).map((p, i) => ({
+        panelIdx: resolvePanelIdx(p, link, i),
+        q: p.q, r: p.r
+      }));
+      if (pts.length < 2) return;
+
+      // 统计起点
+      const p0 = pts[0];
+      bump(p0.panelIdx, p0.q, p0.r);
+
+      if (type === 'flight') {
+        // 暂存，稍后最后再画（保证 flight 在最上层）
+        const g0 = getHexGlobalXY(pts[0].panelIdx, pts[0].q, pts[0].r);
+        const g1 = getHexGlobalXY(pts[pts.length - 1].panelIdx, pts[pts.length - 1].r, pts[pts.length - 1].r)
+                || getHexGlobalXY(pts[pts.length - 1].panelIdx, pts[pts.length - 1].q, pts[pts.length - 1].r);
+        // 上面容错：如果你没有笔误，可以直接用第一种（我保留这行以免出现未定义）
+        const g1safe = getHexGlobalXY(pts[pts.length - 1].panelIdx, pts[pts.length - 1].q, pts[pts.length - 1].r);
+        if (g0 && g1safe) flightsToDraw.push({ p0: g0, p1: g1safe, style });
       } else {
-        const style = App.config[link.type] || App.config.road;
-        const panelIdx = link.panelIdx ?? (link.path && link.path[0].panelIdx) ?? 0;
+        // road/river：立即画在各自 panel 的 links 层（最底层）
+        const panelIdx = pts[0].panelIdx;
         const overlaySvg = App.overlaySvgs[panelIdx];
-        const g = overlaySvg.select("g");
-        const hexMap = App.hexMapsByPanel[panelIdx];
-        const points = link.path.map(p => {
-          const hex = hexMap && hexMap.get(`${p.q},${p.r}`);
-          return hex ? [hex.x, hex.y] : null;
-        }).filter(Boolean);
-        if (points.length < 2) return;
-        if (points.length === 2) {
-          g.append("line")
-            .attr("x1", points[0][0]).attr("y1", points[0][1])
-            .attr("x2", points[1][0]).attr("y2", points[1][1])
-            .attr("stroke", style.color).attr("stroke-width", style.width)
-            .attr("stroke-opacity", style.opacity).attr("fill", "none")
-            .attr("stroke-dasharray", style.dash || null);
+        if (!overlaySvg) return;
+        const gRoot  = overlaySvg.select('g.overlay-root');
+        const gLines = gRoot.select('g.links');
+
+        const xy = pts.map(p => getLocalXY(p.panelIdx, p.q, p.r)).filter(Boolean);
+        if (xy.length < 2) return;
+
+        if (xy.length === 2) {
+          gLines.append('line')
+            .attr('x1', xy[0][0]).attr('y1', xy[0][1])
+            .attr('x2', xy[1][0]).attr('y2', xy[1][1])
+            .attr('stroke', style.color).attr('stroke-width', style.width)
+            .attr('stroke-opacity', style.opacity).attr('fill', 'none')
+            .attr('stroke-dasharray', style.dash || null);
         } else {
-          g.append("polyline")
-            .attr("points", points.map(p => p.join(",")).join(" "))
-            .attr("stroke", style.color).attr("stroke-width", style.width)
-            .attr("stroke-opacity", style.opacity).attr("fill", "none")
-            .attr("stroke-dasharray", style.dash || null);
+          gLines.append('polyline')
+            .attr('points', xy.map(p => p.join(',')).join(' '))
+            .attr('stroke', style.color).attr('stroke-width', style.width)
+            .attr('stroke-opacity', style.opacity).attr('fill', 'none')
+            .attr('stroke-dasharray', style.dash || null);
         }
       }
     });
 
-    // 临时航线（起点已设后）
+    // —— 再画 城市/首都（中层） —— //
+    const baseR = App.config.city.radius;
+    startCountPerPanel.forEach((map, pIdx) => {
+      const overlay = App.overlaySvgs[pIdx];
+      if (!overlay) return;
+      const gCities = overlay.select('g.overlay-root').select('g.cities');
+
+      map.forEach((count, key) => {
+        const [qStr, rStr] = key.split(',');
+        const q = +qStr, r = +rStr;
+        const xy = getLocalXY(pIdx, q, r);
+        if (!xy) return;
+
+        // 城市（1条起点）: 单圆，白填充 + 灰描边
+        if (count === 1) {
+          gCities.append('circle')
+            .attr('cx', xy[0]).attr('cy', xy[1])
+            .attr('r', baseR)
+            .attr('fill', App.config.city.fill)               // 白色
+            .attr('stroke', App.config.city.borderColor)      // 灰边
+            .attr('stroke-width', App.config.city.borderWidth)
+            .attr('vector-effect', 'non-scaling-stroke')
+            .style('pointer-events', 'none');
+        } else if (count >= 2) {
+          // 首都（≥2 条起点）: 外圈 + 内实心圆（都白填充，灰描边）
+          const outerR = baseR * 1.6;
+        
+          // 外圆
+          gCities.append('circle')
+            .attr('cx', xy[0]).attr('cy', xy[1])
+            .attr('r', outerR)
+            .attr('fill', App.config.city.fill)
+            .attr('stroke', App.config.city.borderColor)
+            .attr('stroke-width', App.config.city.borderWidth)
+            .attr('vector-effect', 'non-scaling-stroke')
+            .style('pointer-events', 'none');
+          // 内圈
+          gCities.append('circle')
+            .attr('cx', xy[0]).attr('cy', xy[1])
+            .attr('r', baseR)
+            .attr('fill', App.config.city.fill)
+            .attr('stroke', App.config.city.borderColor)
+            .attr('stroke-width', App.config.city.borderWidth)
+            .attr('vector-effect', 'non-scaling-stroke')
+            .style('pointer-events', 'none');
+
+        }
+      });
+
+      // 提升城市层到当前 panel 的最上面（仍然会被 flight 盖住，因为 flight 在全局 overlay）
+      gCities.raise();
+    });
+
+    // —— 最后画 flight（最高层：全局 overlay） —— //
+    flightsToDraw.forEach(({ p0, p1, style }) => {
+      const dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+      const mx = (p0[0] + p1[0]) / 2, my = (p0[1] + p1[1]) / 2;
+      const curveOffset = Math.sign(dx) * style.controlCurveRatio * Math.sqrt(dx*dx + dy*dy);
+      const c1x = mx + curveOffset, c1y = my - curveOffset;
+
+      gGlobalLines.append('path')
+        .attr('d', `M${p0[0]},${p0[1]} Q${c1x},${c1y} ${p1[0]},${p1[1]}`)
+        .attr('stroke', style.color)
+        .attr('stroke-width', style.width)
+        .attr('stroke-opacity', style.opacity)
+        .attr('fill', 'none')
+        .attr('stroke-dasharray', style.dash || null);
+    });
+
+    // —— 临时 flight（跟随鼠标），也在最高层 —— //
     if (showTempFlight && App.flightStart) {
       const a = App.flightStart;
       const p0 = getHexGlobalXY(a.panelIdx, a.q, a.r);
@@ -875,16 +994,17 @@ export async function initSemanticMap({
         const mx = (p0[0] + p1[0]) / 2, my = (p0[1] + p1[1]) / 2;
         const curveOffset = Math.sign(dx) * style.controlCurveRatio * Math.sqrt(dx*dx + dy*dy);
         const c1x = mx + curveOffset, c1y = my - curveOffset;
-        d3.select(App.globalOverlayEl).append("path")
-          .attr("d", `M${p0[0]},${p0[1]} Q${c1x},${c1y} ${p1[0]},${p1[1]}`)
-          .attr("stroke", style.color)
-          .attr("stroke-width", style.tempWidth)
-          .attr("stroke-opacity", style.tempOpacity)
-          .attr("fill", "none")
-          .attr("stroke-dasharray", style.tempDash);
-        }
+
+        gGlobalLines.append('path')
+          .attr('d', `M${p0[0]},${p0[1]} Q${c1x},${c1y} ${p1[0]},${p1[1]}`)
+          .attr('stroke', style.color)
+          .attr('stroke-width', style.tempWidth)
+          .attr('stroke-opacity', style.tempOpacity)
+          .attr('fill', 'none')
+          .attr('stroke-dasharray', style.tempDash);
       }
     }
+  }
 
     /** =========
      * 选中/高亮样式统一更新（核心）
@@ -1029,11 +1149,13 @@ export async function initSemanticMap({
 
   // —— 通用：从一组 "panelIdx|q,r" keys 生成快照 ——
   // 规则：nodes = 这些 key 对应的 hex；
-  //       links = _lastLinks 中 “全部 path 点都在 keySet 内”的连线（避免引入外部点）
+  //       links = 对每条“原始 path”先过滤掉未在 keySet 内的点；
+  //               再把过滤后“连续的片段（长度>=2）”作为输出路径；
+  //               这样可在取消某些中间点后，自动把剩余高亮端点“直接相连”。
   function snapshotFromKeySet(keySet) {
     if (!keySet || keySet.size === 0) return { nodes: [], links: [] };
 
-    // 1) nodes
+    // 1) nodes：与原来一致
     const nodes = [];
     for (const k of keySet) {
       const [pStr, qr] = k.split('|');
@@ -1049,14 +1171,16 @@ export async function initSemanticMap({
       });
     }
 
-    // 2) links：只保留 path 的每个点都在 keySet 内的连线
+    // 2) links：按“过滤 + 分段 + 压缩”的新规则产出
     const links = [];
+    const keyOf = (p) => `${p.panelIdx}|${p.q},${p.r}`;
+
     for (const e of (App._lastLinks || [])) {
       const rawPts = Array.isArray(e.path) ? e.path : [];
       if (rawPts.length < 2) continue;
 
+      // 统一解析 panelIdx
       const normPts = rawPts.map((p, i) => {
-        // 统一解析 panelIdx
         let panelIdx = p.panelIdx;
         if (typeof panelIdx !== 'number') {
           if (e.type === 'flight') {
@@ -1070,20 +1194,31 @@ export async function initSemanticMap({
         return { panelIdx, q: p.q, r: p.r };
       });
 
-      const allInside = normPts.every(pt => keySet.has(`${pt.panelIdx}|${pt.q},${pt.r}`));
-      if (!allInside) continue;
+      // 过滤掉未在 keySet 内的点（保留顺序）
+      const filtered = normPts.filter(pt => keySet.has(keyOf(pt)));
 
-      const a = normPts[0], b = normPts[normPts.length - 1];
-      links.push({
-        id: e.id || `${a.panelIdx}:${a.q},${a.r}->${b.panelIdx}:${b.q},${b.r}`,
-        type: e.type || 'road',
-        path: normPts.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r }))
-      });
+      if (filtered.length < 2) continue; // 只剩 0/1 个点就没法成线
+
+      // 把“过滤后相邻的点”作为一个压缩后的片段
+      // 注意：此处 filtered 已经是按原路径顺序的“保留点序列”，
+      //       直接把它作为一个片段即可（等价于把被剔除的中间节点“跨过去”）。
+      // 如果希望更细致地“断开非相邻原点”的地方，可在这里加判定；当前按需求可直接压缩。
+      const segments = [filtered];
+
+      // 输出每个片段（长度>=2）
+      for (const seg of segments) {
+        if (seg.length < 2) continue;
+        const a = seg[0], b = seg[seg.length - 1];
+        links.push({
+          id: e.id || `${a.panelIdx}:${a.q},${a.r}->${b.panelIdx}:${b.q},${b.r}`,
+          type: e.type || 'road',
+          path: seg.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r }))
+        });
+      }
     }
 
     return { nodes, links };
   }
-
 
   // —— 基于“当前选中点”的一跳筛选：返回这些点 + 与它们直接相连的所有连线（road/river/flight）——
   function buildOneHopSnapshotFromSeeds() {
@@ -1399,6 +1534,15 @@ export async function initSemanticMap({
     });
   }
 
+  // 确保全局 overlay 也有两层
+  {
+    const d3Global = d3.select(App.globalOverlayEl);
+    if (d3Global.select('g.overlay-root').empty()) {
+      const root = d3Global.append('g').attr('class', 'overlay-root');
+      root.append('g').attr('class', 'links');
+      root.append('g').attr('class', 'cities');
+    }
+  }
 
   /** =========
    * 初始化与全局事件
@@ -1597,9 +1741,14 @@ export async function initSemanticMap({
     },
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
-      // 直接使用当前“持久高亮集合”生成快照
-      return snapshotFromKeySet(App.persistentHexKeys || new Set());
+      // 统一以“当前高亮集”导出
+      const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
+        ? App.highlightedHexKeys
+        : App.persistentHexKeys;
+
+      return snapshotFromKeySet(keySet || new Set());
     },
+
     
 
   };
