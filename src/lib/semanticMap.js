@@ -46,7 +46,7 @@ const STYLE = {
   COUNTRY_BORDER_WIDTH: 1.5,
 
   PLAYGROUND_PADDING: 12,
-  CLICK_DELAY: 250,
+  CLICK_DELAY: 350,
 
   SUBSPACE_MIN_W: 360,
   SUBSPACE_MIN_H: 400,
@@ -128,6 +128,8 @@ export async function initSemanticMap({
     flightHoverTarget: null,
     hoveredHex: null,
     _clickTimer: null,
+    _awaitingSingle: false,   // ★ NEW：是否在等待触发单击处理
+    _lastClickAt: 0,          // ★ NEW：最近一次 click 的时间戳（非必须，但留作需要）
 
     // 选中与快照
     persistentHexKeys: new Set(),
@@ -150,6 +152,7 @@ export async function initSemanticMap({
    * ========================= */
   const pkey = (panelIdx, q, r) => `${panelIdx}|${q},${r}`;
   const pointId = (panelIdx, q, r) => `${panelIdx}:${q},${r}`;
+  const isCtrlLike = (e) => !!(e.metaKey || e.ctrlKey);
 
   const styleOf = (t) =>
     (t === 'flight') ? App.config.flight
@@ -492,13 +495,23 @@ export async function initSemanticMap({
             }
             updateHexStyles();
           }).on('click', (event, d) => {
-            event.preventDefault(); event.stopPropagation();
+            event.preventDefault();
+            event.stopPropagation();
+            // 阻断双击序列里的单击
+            if (event.detail && event.detail > 1) return;
             if (App._clickTimer) clearTimeout(App._clickTimer);
-            App._clickTimer = setTimeout(() => handleSingleClick(panelIdx, d.q, d.r), STYLE.CLICK_DELAY);
+
+            const withCtrl = isCtrlLike(event);   // ← 这里用 Ctrl/Meta
+            App._clickTimer = setTimeout(() => {
+              handleSingleClick(panelIdx, d.q, d.r, withCtrl);
+            }, STYLE.CLICK_DELAY);
           }).on('dblclick', (event, d) => {
             event.preventDefault(); event.stopPropagation();
             if (App._clickTimer) { clearTimeout(App._clickTimer); App._clickTimer = null; }
             handleDoubleClick(panelIdx, d.q, d.r, event);
+          }).on('contextmenu', (event) => {
+            // Mac 的 ctrl-click 会触发 contextmenu；阻止它以保证 click 能正常走逻辑
+            event.preventDefault();
           });
 
           return g.attr('transform', d => `translate(${d.x},${d.y})`);
@@ -814,7 +827,7 @@ export async function initSemanticMap({
    * 交互/快照
    * ========================= */
   function buildUndirectedAdjacency() {
-    const adj = new Map(); // key -> Set<key>
+    const adj = new Map();
     const key = (panelIdx, q, r) => `${panelIdx}|${q},${r}`;
     const ensure = (k) => { if (!adj.has(k)) adj.set(k, new Set()); return adj.get(k); };
 
@@ -836,6 +849,63 @@ export async function initSemanticMap({
     return adj;
   }
 
+  function findEndpointMate(panelIdx, q, r) {
+    const k = (p, q, r) => `${p}|${q},${r}`;
+    for (const e of (App._lastLinks || [])) {
+      const path = Array.isArray(e.path) ? e.path : [];
+      if (path.length < 2) continue;
+      const pts = path.map((p, i) => ({
+        panelIdx: resolvePanelIdxForPathPoint(p, e, i), q: p.q, r: p.r
+      }));
+      const idx = pts.findIndex(p => p.panelIdx === panelIdx && p.q === q && p.r === r);
+      if (idx < 0) continue;
+
+      if (idx === 0) {
+        const nb = pts[1];
+        return { found: true, mateKey: k(nb.panelIdx, nb.q, nb.r) };
+      }
+      if (idx === pts.length - 1) {
+        const nb = pts[pts.length - 2];
+        return { found: true, mateKey: k(nb.panelIdx, nb.q, nb.r) };
+      }
+      // 中间点返回 not-found
+    }
+    return { found: false };
+  }
+
+  function removeSingleNode(panelIdx, q, r) {
+    App.persistentHexKeys.delete(pkey(panelIdx, q, r));
+  }
+
+  
+
+  // ★ NEW：从某个 key 出发，拿到“整条连通分量”（Set<key>）
+   function getComponentKeysFrom(adj, startKey) {
+     const visited = new Set([startKey]);
+     const q = [startKey];
+     while (q.length) {
+       const cur = q.shift();
+       for (const nb of (adj.get(cur) || new Set())) {
+         if (!visited.has(nb)) { visited.add(nb); q.push(nb); }
+       }
+     }
+     return visited;
+   }
+ 
+   // ★ NEW：批量选中/取消一个点所在的整条连通分量
+   function selectComponent(panelIdx, q, r) {
+     const k = pkey(panelIdx, q, r);
+     const adj = buildUndirectedAdjacency();
+     const comp = getComponentKeysFrom(adj, k);
+     comp.forEach(kk => App.persistentHexKeys.add(kk));
+   }
+   function deselectComponent(panelIdx, q, r) {
+     const k = pkey(panelIdx, q, r);
+     const adj = buildUndirectedAdjacency();
+     const comp = getComponentKeysFrom(adj, k);
+     comp.forEach(kk => App.persistentHexKeys.delete(kk));
+   }
+
   function snapshotFromKeySet(keySet) {
     if (!keySet || keySet.size === 0) return { nodes: [], links: [] };
 
@@ -856,78 +926,106 @@ export async function initSemanticMap({
 
     const links = [];
     const inSet = (p) => keySet.has(`${p.panelIdx}|${p.q},${p.r}`);
+    const usedKeys = new Set(); // 被任何“片段”消费的点
 
     for (const e of (App._lastLinks || [])) {
       const rawPts = Array.isArray(e.path) ? e.path : [];
       if (rawPts.length < 2) continue;
-
-      const normPts = rawPts.map((p, i) => ({
-        panelIdx: resolvePanelIdxForPathPoint(p, e, i),
-        q: p.q, r: p.r
+      const norm = rawPts.map((p, i) => ({
+        panelIdx: resolvePanelIdxForPathPoint(p, e, i), q: p.q, r: p.r
       }));
-      const filtered = normPts.filter(inSet);
-      if (filtered.length < 2) continue;
 
-      // 这两行：为该 link 统计涉及的面板索引与名字
-      const panels = Array.from(new Set(filtered.map(pt => pt.panelIdx)));
-      const panelNames = panels.map(idx => App.currentData?.subspaces?.[idx]?.subspaceName || `Subspace ${idx+1}`);
+      // 按“在选集中”的连续片段切
+      let run = [];
+      const flush = () => {
+        if (run.length >= 2) {
+          run.forEach(pt => usedKeys.add(`${pt.panelIdx}|${pt.q},${pt.r}`));
+          const panels = Array.from(new Set(run.map(pt => pt.panelIdx)));
+          const panelNames = panels.map(idx => App.currentData?.subspaces?.[idx]?.subspaceName || `Subspace ${idx+1}`);
+          const first = run[0], last = run[run.length-1];
+          links.push({
+            id: `${e.type || 'road'}:${first.panelIdx}:${first.q},${first.r}->${last.panelIdx}:${last.q},${last.r}`,
+            type: e.type || 'road',
+            path: run.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r })),
+            panels, panelNames
+          });
+        }
+        run = [];
+      };
 
+      for (let i = 0; i < norm.length; i++) {
+        if (inSet(norm[i])) run.push(norm[i]); else flush();
+      }
+      flush();
+    }
+
+    // 把未被任何片段消费的“孤点”也作为单点 link 传出去
+    for (const k of keySet) {
+      if (usedKeys.has(k)) continue;
+      const [pStr, qr] = k.split('|'); const [qStr, rStr] = qr.split(',');
+      const panelIdx = parseInt(pStr, 10); const q = parseInt(qStr, 10); const r = parseInt(rStr, 10);
+      const panels = [panelIdx];
+      const panelNames = [App.currentData?.subspaces?.[panelIdx]?.subspaceName || `Subspace ${panelIdx+1}`];
       links.push({
-        id: e.id || `${filtered[0].panelIdx}:${filtered[0].q},${filtered[0].r}->${filtered.at(-1).panelIdx}:${filtered.at(-1).q},${filtered.at(-1).r}`,
-        type: e.type || 'road',
-        path: filtered.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r })),
-        panels,            // ← 新增
-        panelNames         // ← 新增
+        id: `single:${panelIdx}:${q},${r}`,
+        type: 'single',
+        path: [{ panelIdx, q, r }],
+        panels, panelNames
       });
     }
 
     return { nodes, links };
   }
 
+
   function publishToStepAnalysis() {
     App._lastSnapshot = snapshotFromKeySet(App.persistentHexKeys || new Set());
   }
 
-  function handleSingleClick(panelIdx, q, r) {
+  function handleSingleClick(panelIdx, q, r, withCtrl = false) {
     const k = pkey(panelIdx, q, r);
 
-    // 已高亮：移除
-    if (App.persistentHexKeys.has(k)) {
-      App.persistentHexKeys.delete(k);
-      if (App.selectedHex?.panelIdx === panelIdx && App.selectedHex.q === q && App.selectedHex.r === r) {
-        App.selectedHex = null;
+    if (!withCtrl) {
+      // 普通单击：整片切（连通分量切换）
+      if (App.persistentHexKeys.has(k)) {
+        deselectComponent(panelIdx, q, r);
+        if (App.selectedHex?.panelIdx === panelIdx && App.selectedHex.q === q && App.selectedHex.r === r) {
+          App.selectedHex = null;
+        }
+      } else {
+        selectComponent(panelIdx, q, r);
+        App.selectedHex = { panelIdx, q, r };
       }
-      updateHexStyles();
-      publishToStepAnalysis();
-      return;
+    } else {
+      // Ctrl/⌘：单点切 + 端点配对切
+      if (App.persistentHexKeys.has(k)) {
+        removeSingleNode(panelIdx, q, r);     // 只移除当前点
+      } else {
+        const mate = findEndpointMate(panelIdx, q, r); // 若为端点则成对选
+        if (mate.found) {
+          App.persistentHexKeys.add(k);
+          App.persistentHexKeys.add(mate.mateKey);
+        } else {
+          App.persistentHexKeys.add(k);
+        }
+        App.selectedHex = { panelIdx, q, r };
+      }
     }
 
-    // 未高亮：加入该无向连通分量
-    const adj = buildUndirectedAdjacency();
-    const visited = new Set([k]);
-    const qBFS = [k];
-    while (qBFS.length) {
-      const cur = qBFS.shift();
-      const nbs = adj.get(cur) || new Set();
-      for (const nb of nbs) if (!visited.has(nb)) { visited.add(nb); qBFS.push(nb); }
-    }
-    for (const kk of visited) App.persistentHexKeys.add(kk);
-
-    App.selectedHex = { panelIdx, q, r };
     updateHexStyles();
-    publishToStepAnalysis();
+    publishToStepAnalysis();   // ← 这会把当前高亮集快照传给右侧
   }
 
   function handleDoubleClick(panelIdx, q, r, event) {
     const here = { panelIdx, q, r };
 
-    // 设置/取消起点
     if (!App.flightStart) {
       App.flightStart = here;
       const rect = App.playgroundEl.getBoundingClientRect();
       App.currentMouse.x = event.clientX - rect.left;
       App.currentMouse.y = event.clientY - rect.top;
-      App.persistentHexKeys.add(pkey(panelIdx, q, r));
+      // 双击也把所在连通分量选上
+      selectComponent(panelIdx, q, r);
       updateHexStyles();
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, true);
       publishToStepAnalysis();
@@ -943,10 +1041,10 @@ export async function initSemanticMap({
       return;
     }
 
-    // 建立连线
+    // 建立 flight
     addCustomFlightLink(App.flightStart, here);
 
-    // 两端加入持久高亮
+    // 两端固定为已选（保持选中）
     App.persistentHexKeys.add(pkey(App.flightStart.panelIdx, App.flightStart.q, App.flightStart.r));
     App.persistentHexKeys.add(pkey(panelIdx, q, r));
 
@@ -955,6 +1053,7 @@ export async function initSemanticMap({
     updateHexStyles();
     publishToStepAnalysis();
   }
+
 
   function addCustomFlightLink(a, b) {
     const flight = {
@@ -1274,7 +1373,7 @@ export async function initSemanticMap({
       // 新增：把当前点击点作为 focusId（若有）
       const focusId = App.selectedHex
         ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
-        : null
+        : null;
 
       return { ...snap, meta: { focusId } }
     },
@@ -1287,3 +1386,5 @@ export async function initSemanticMap({
 export function destroySemanticMap(cleanup) {
   if (typeof cleanup === 'function') cleanup();
 }
+
+
