@@ -280,6 +280,9 @@ export async function initSemanticMap({
         }
       }
     });
+    // ★ 集合变更后立即重画
+    drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+   
   }
 
 
@@ -666,22 +669,32 @@ export async function initSemanticMap({
       return hex ? [hex.x, hex.y] : null;
     };
 
-    // 遍历所有连线
     (links || []).forEach(link => {
       const type  = link.type || 'road';
       const style = styleOf(type);
-      const pts = (link.path || []).map((p, i) => ({
+
+      // 1) 原始路径 → 标准化 panelIdx
+      const ptsRaw = (link.path || []).map((p, i) => ({
         panelIdx: resolvePanelIdxForPathPoint(p, link, i),
         q: p.q, r: p.r
       }));
+
+      // 2) 若这条线路被选中：按排除点过滤（关键改动）
+      let pts = ptsRaw;
+      const lk = linkKey(link);
+      if (App.selectedRouteIds.has(lk)) {
+        pts = ptsRaw.filter(p => !App.excludedHexKeys.has(`${p.panelIdx}|${p.q},${p.r}`));
+      }
+
+      // 3) 过滤后不足两点，不画
       if (pts.length < 2) return;
 
-      // 起点计数（用于城市/首都）
+      // 4) 起点计数（用于城市/首都，基于过滤后的首点）
       const p0 = pts[0];
       bump(p0.panelIdx, p0.q, p0.r);
 
       if (type === 'flight') {
-        // 仅当两端可见时，才绘制 flight
+        // flight：仍用端点绘制；不受中间点排除影响
         const a = pts[0];
         const b = pts[pts.length - 1];
         if (!flightEndpointsVisible(a, b)) return;
@@ -703,7 +716,7 @@ export async function initSemanticMap({
           .attr('fill', 'none')
           .attr('stroke-dasharray', style.dash || null);
       } else {
-        // road/river：各自 panel 的 links 层（在城市层下方）
+        // road/river：按过滤后的 pts 直接画，跳过被排除的中间点
         const panelIdx = pts[0].panelIdx;
         const overlaySvg = App.overlaySvgs[panelIdx];
         if (!overlaySvg) return;
@@ -729,7 +742,7 @@ export async function initSemanticMap({
       }
     });
 
-    // 城市/首都（中层）
+    // 城市/首都（中层）—保持不变
     startCountPerPanel.forEach((map, pIdx) => {
       const overlay = App.overlaySvgs[pIdx];
       if (!overlay) return;
@@ -745,7 +758,6 @@ export async function initSemanticMap({
         const cx = hex.x, cy = hex.y;
 
         if (count === 1) {
-          // 城市：单圆（白填充、灰描边）
           gCities.append('circle')
             .attr('cx', cx).attr('cy', cy)
             .attr('r', baseR)
@@ -755,7 +767,6 @@ export async function initSemanticMap({
             .attr('vector-effect', 'non-scaling-stroke')
             .style('pointer-events', 'none');
         } else if (count >= 2) {
-          // 首都：外圆（白填充） + 内实心圆（黑填充），均灰描边
           const outerR = baseR * 1.4;
           const innerR = baseR * 0.8;
           gCities.append('circle')
@@ -777,11 +788,10 @@ export async function initSemanticMap({
         }
       });
 
-      // 提升城市层（仍在 flight 以下，因为 flight 在全局 overlay）
       gCities.raise();
     });
 
-    // 临时 flight（最高层，且仅当起点可见）
+    // 临时 flight（保持不变）
     if (showTempFlight && App.flightStart) {
       const a = App.flightStart;
       const startVisible = isPointVisible(a.panelIdx, a.q, a.r);
@@ -1236,6 +1246,9 @@ export async function initSemanticMap({
       // ★ 依据“所选线路 + 排除点”重建节点高亮
       recomputePersistentFromRoutes();
       App.selectedHex = { panelIdx, q, r };
+      // ★ 立刻重绘 Overlay（让被排除的点立刻从折线中剔除）
+      drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+     
     }
 
     updateHexStyles();
@@ -1428,6 +1441,9 @@ export async function initSemanticMap({
       App.selectedRouteIds.clear();   // ★ 新增
       App.excludedHexKeys.clear();    // ★ 新增
       App.persistentHexKeys.clear();  // ★ 新增
+      // ★ 清空后也要重画，恢复默认线路形态
+      drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+      
       updateHexStyles();
       publishToStepAnalysis();
     }
@@ -1600,19 +1616,25 @@ export async function initSemanticMap({
     },
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
-      const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
-        ? App.highlightedHexKeys
-        : App.persistentHexKeys;
+      // 当存在“整条线路选择”时，优先使用路线快照（会把被排除点跨过去，得到 A-C 这样的新边）
+      let snap;
+      if (App.selectedRouteIds && App.selectedRouteIds.size > 0) {
+        snap = snapshotFromSelectedRoutes();
+      } else {
+        const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
+          ? App.highlightedHexKeys
+          : App.persistentHexKeys;
+        snap = snapshotFromKeySet(keySet || new Set());
+      }
 
-      const snap = snapshotFromKeySet(keySet || new Set())
-
-      // 新增：把当前点击点作为 focusId（若有）
+      // 保持原有的 focusId 行为
       const focusId = App.selectedHex
         ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
         : null;
 
-      return { ...snap, meta: { focusId } }
+      return { ...snap, meta: { focusId } };
     },
+
 
   };
 
