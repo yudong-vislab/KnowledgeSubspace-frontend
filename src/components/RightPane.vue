@@ -1,11 +1,13 @@
+<!-- src/components/RightPane.vue -->
 <template>
   <section class="rp-card one">
-    <header class="card__title">Steps</header>
+    <header class="card__title">In-process Analysis View</header>
+
     <div class="rp-card__body">
       <div class="steps-stack" ref="stackRef">
-        <!-- 每个保存的步骤一张卡片 -->
+        <!-- 父卡片（一次保存） -->
         <article v-for="(step, i) in steps" :key="step.id" class="step-card">
-          <!-- 1) 标题（可双击编辑） -->
+          <!-- 标题（一次保存一个） -->
           <div
             class="step__title"
             :data-index="i"
@@ -18,21 +20,14 @@
             {{ step.title || defaultTitle(step, i) }}
           </div>
 
-          <!-- 2) Hex 概览（预留：节点/连线统计或小预览） -->
-          <div class="step__hex">
-            <div class="mini-line">Nodes: {{ step.nodes?.length || 0 }}, Links: {{ step.links?.length || 0 }}</div>
-            <RelationGraph class="relg" :data="{ nodes: step.nodes, links: step.links }" />
-
-          </div>
-
-          <!-- 3) 原文句子（预留占位） -->
-          <div class="step__source">
-            <div class="placeholder">Raw sentences / context (占位)</div>
-          </div>
-
-          <!-- 4) 大模型总结（预留占位） -->
-          <div class="step__llm">
-            <div class="placeholder">LLM summary (占位)</div>
+          <!-- 子卡片列表：每条 link 一张 -->
+          <div class="subcards">
+            <LinkCard
+              v-for="(lk, j) in (step.links || [])"
+              :key="j"
+              :link="lk"
+              :nodes="step.nodes || []"
+            />
           </div>
         </article>
       </div>
@@ -43,60 +38,51 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { onSelectionSaved } from '../lib/selectionBus'
-import RelationGraph from './RelationGraph.vue'
+import LinkCard from './LinkCard.vue'
 
-
-const steps = ref([])        // 保存的步骤栈
+const steps = ref([])
 const stackRef = ref(null)
-const editingIdx = ref(-1)   // 正在编辑的标题索引
+const editingIdx = ref(-1)
 
-// 生成默认标题
 const defaultTitle = (step, i) => {
   const t = step.createdAt ? new Date(step.createdAt) : new Date()
   const ts = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}:${t.getSeconds().toString().padStart(2,'0')}`
   return `Step ${i + 1} · ${ts}`
 }
 
-// 接收“保存步骤”，堆叠卡片
 let offSaved = null
 onMounted(() => {
   offSaved = onSelectionSaved((payload) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    // 直接用 semanticMap 的快照结构：{nodes, links}
     steps.value.push({
       id,
       title: payload.title || '',
       createdAt: payload.createdAt || Date.now(),
-      nodes: payload.nodes || [],
-      links: payload.links || [],
+      nodes: Array.isArray(payload.nodes) ? payload.nodes : [],
+      links: Array.isArray(payload.links) ? payload.links : [],
       rawText: payload.rawText || '',
       summary: payload.summary || '',
       meta: payload.meta || {}
     })
-
-    // 滚到最下（可选）
     requestAnimationFrame(() => {
       const el = stackRef.value
       if (el) el.scrollTop = el.scrollHeight
     })
   })
 })
-
-onBeforeUnmount(() => {
-  offSaved?.()
-})
+onBeforeUnmount(() => offSaved?.())
 
 /** ====== 标题编辑 ====== */
 function beginEditTitle(i, evt) {
   editingIdx.value = i
   const el = evt.currentTarget
   if (!el) return
-  // 选中全部文本
   const range = document.createRange()
   range.selectNodeContents(el)
   const sel = window.getSelection()
   sel.removeAllRanges(); sel.addRange(range)
 }
-
 function finishEditTitle(i, evt) {
   if (editingIdx.value !== i) return
   const el = evt.currentTarget
@@ -105,7 +91,6 @@ function finishEditTitle(i, evt) {
   steps.value[i].title = txt || ''
   editingIdx.value = -1
 }
-
 function onTitleKey(i, evt) {
   if (editingIdx.value !== i) return
   if (evt.key === 'Enter') {
@@ -113,7 +98,6 @@ function onTitleKey(i, evt) {
     evt.currentTarget?.blur()
   } else if (evt.key === 'Escape') {
     evt.preventDefault()
-    // 取消：恢复显示内容
     const el = evt.currentTarget
     if (el) el.textContent = steps.value[i].title || defaultTitle(steps.value[i], i)
     editingIdx.value = -1
@@ -122,64 +106,29 @@ function onTitleKey(i, evt) {
 </script>
 
 <style scoped>
-.rp-card.one{
-  height:100%;
-  background:#fff; border-radius:12px;
-  display:flex; flex-direction:column; min-height:0; overflow:hidden;
-}
+.rp-card.one{ height:100%; background:#fff; border-radius:12px;
+  display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+/* .card__title{ padding:10px 12px; font-weight:800; font-size: 16px; border-bottom:1px solid #eee; } */
+.rp-card__body{ padding:6px; min-height:0; overflow:auto; }
 
-.card__title{
-  padding:10px 12px; font-weight:600; border-bottom:1px solid #eee;
-}
+.steps-stack{ width:100%; height:100%; overflow:auto; min-height:0; scrollbar-width: none; }
+.steps-stack::-webkit-scrollbar{ width:0; height:0; }
 
-.rp-card__body{
-  padding:8px; min-height:0; overflow:auto;
-}
-
-/* 容器：隐藏滚动条但可滚动 */
-.steps-stack{
-  width:100%; height:100%; overflow:auto; min-height:0;
-  scrollbar-width: none;           /* Firefox */
-}
-.steps-stack::-webkit-scrollbar{   /* WebKit */
-  width:0; height:0;
-}
-
-/* 单个步骤卡片 */
 .step-card{
   border:1px solid #e5e7eb; border-radius:10px;
-  padding:8px; margin-bottom:10px;
-  display:grid;
-  grid-template-rows: auto auto auto auto; /* 标题 + hex + 原文 + LLM */
-  gap:8px;
+  padding:6px; margin-bottom:10px;
+  display:grid; gap:4px;
+  grid-template-rows: auto auto;  /* 标题 + 子卡片区 */
   background:#fff;
 }
-
-/* 1) 标题条：可双击编辑 */
 .step__title{
-  font-weight:600; line-height:1.4; padding:6px 8px; border-radius:8px;
+  font-weight:600; font-size: 14px;line-height:1; padding:6px 6px; border-radius:8px;
   background:#f9fafb; user-select:text; cursor:text;
   outline:none; border:1px dashed transparent;
 }
-.step__title[contenteditable="plaintext-only"]{
-  border-color:#c7d2fe; background:#eef2ff;
+.step__title[contenteditable="plaintext-only"]{ border-color:#c7d2fe; background:#eef2ff; }
+
+.subcards{
+  display:flex; flex-direction:column; gap:10px;
 }
-
-/* 2-4) 三个内容块（先放占位） */
-.step__hex, .step__source, .step__llm{
-  border:1px dashed #e5e7eb; border-radius:8px; padding:8px; min-height:44px;
-}
-
-.mini-line{ font-size:12px; color:#6b7280; }
-.placeholder{ color:#9ca3af; font-size:12px; }
-
-.step__hex{
-  border:1px dashed #e5e7eb; border-radius:8px; padding:8px; 
-  /* 给可视化留固定高度（你可以根据需要调） */
-  height:160px; 
-  position: relative;            /* 让内部 100% 高度生效 */
-  overflow: hidden;
-}
-.relg{ width:100%; height:100%; display:block; }
-
 </style>

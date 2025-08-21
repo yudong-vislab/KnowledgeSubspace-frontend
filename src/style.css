@@ -116,7 +116,7 @@ body,
 /* playground 占满剩余空间；min-height 让背景跟着内容拉长 */
 #playground {
   position: relative;
-  padding: 16px;
+  padding: 12px;
   min-height: calc(100% - 44px);
   /* 44≈header高度(含边框)，按你的header实际高度微调 */
   background: inherit;

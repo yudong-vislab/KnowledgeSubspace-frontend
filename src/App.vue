@@ -45,7 +45,7 @@ html, body, #app { height: 100%; margin: 0; background: #f3f4f6; }
   height: calc(100% - var(--titlebar-h));
   /* 也可用 flex: 1;min-height:0; 但明确 height 更稳妥 */
   display: grid;
-  grid-template-columns: 300px minmax(0,1fr) 400px;
+  grid-template-columns: 320px minmax(0,1fr) 360px;
   gap: 5px;
   padding: 5px;
   box-sizing: border-box;
@@ -73,7 +73,7 @@ html, body, #app { height: 100%; margin: 0; background: #f3f4f6; }
 .col-center::-webkit-scrollbar { width: 0; height: 0; }
 
 .card__title {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   color: #333;
   border-bottom: 1px solid #eee;

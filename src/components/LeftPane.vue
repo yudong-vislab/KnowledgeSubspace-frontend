@@ -244,7 +244,7 @@ async function onClearPaper() {
   <div class="lp-shell">
     <!-- 1) Parameters（包含 LLM 选择） -->
     <section class="lp-card">
-      <header class="card__title">Parameters</header>
+      <header class="card__title">Control Panel</header>
 
       <!-- 顶部工具条：选择大模型 -->
       <div class="param-toolbar">

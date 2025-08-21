@@ -868,10 +868,16 @@ export async function initSemanticMap({
       const filtered = normPts.filter(inSet);
       if (filtered.length < 2) continue;
 
+      // 这两行：为该 link 统计涉及的面板索引与名字
+      const panels = Array.from(new Set(filtered.map(pt => pt.panelIdx)));
+      const panelNames = panels.map(idx => App.currentData?.subspaces?.[idx]?.subspaceName || `Subspace ${idx+1}`);
+
       links.push({
         id: e.id || `${filtered[0].panelIdx}:${filtered[0].q},${filtered[0].r}->${filtered.at(-1).panelIdx}:${filtered.at(-1).q},${filtered.at(-1).r}`,
         type: e.type || 'road',
-        path: filtered.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r }))
+        path: filtered.map(pt => ({ panelIdx: pt.panelIdx, q: pt.q, r: pt.r })),
+        panels,            // ← 新增
+        panelNames         // ← 新增
       });
     }
 
@@ -1259,10 +1265,20 @@ export async function initSemanticMap({
     },
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
-      // 统一以“当前高亮集”导出
-      const keySet = App.persistentHexKeys;
-      return snapshotFromKeySet(keySet || new Set());
+      const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
+        ? App.highlightedHexKeys
+        : App.persistentHexKeys;
+
+      const snap = snapshotFromKeySet(keySet || new Set())
+
+      // 新增：把当前点击点作为 focusId（若有）
+      const focusId = App.selectedHex
+        ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
+        : null
+
+      return { ...snap, meta: { focusId } }
     },
+
   };
 
   return controller;
