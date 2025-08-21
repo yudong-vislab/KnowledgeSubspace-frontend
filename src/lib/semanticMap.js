@@ -12,10 +12,10 @@ const STYLE = {
   HEX_FILL_IMAGE: '#a6cee3',
   HEX_FILL_DEFAULT: '#ffffff',
 
-  OPACITY_DEFAULT: 0.2,
+  OPACITY_DEFAULT: 0.3,
   OPACITY_HOVER: 0.8,
   OPACITY_SELECTED: 1.0,
-  OPACITY_NEIGHBOR: 0.8,
+  OPACITY_NEIGHBOR: 0.6,
 
   CITY_RADIUS: 3.5,
   CITY_BORDER_WIDTH: 1.2,
@@ -133,6 +133,7 @@ export async function initSemanticMap({
 
     // 选中与快照
     persistentHexKeys: new Set(),
+    excludedHexKeys: new Set(),
     _lastSnapshot: null,
 
     // 回调 & 容器
@@ -793,13 +794,45 @@ export async function initSemanticMap({
 
   function updateHexStyles() {
     App.neighborKeySet.clear();
+
     for (const k of App.persistentHexKeys) {
       const [panelStr, qr] = k.split('|');
       const [qStr, rStr] = qr.split(',');
       const panelIdx = +panelStr, q = +qStr, r = +rStr;
+
+      // 只对未被排除的持久点扩散邻居（一般持久点不会在排除集里，这里是防御性判断）
+      if (App.excludedHexKeys.has(k)) continue;
+
       const ns = getConnectedHexKeys(panelIdx, q, r);
-      ns.forEach(hk => App.neighborKeySet.add(`${panelIdx}|${hk}`));
-      addFlightNeighbors(panelIdx, q, r);
+      ns.forEach(hk => {
+        const fullKey = `${panelIdx}|${hk}`;
+        if (!App.excludedHexKeys.has(fullKey)) {   // ★ NEW：跳过被排除的邻居
+          App.neighborKeySet.add(fullKey);
+        }
+      });
+
+      // flight 邻居同样要跳过“排除”
+      for (const link of App._lastLinks || []) {
+        if (link.type !== 'flight') continue;
+        const a = link.path?.[0];
+        const b = link.path?.[link.path.length - 1];
+        if (!a || !b) continue;
+
+        const aPanel = resolvePanelIdxForPathPoint(a, link, 0);
+        const bPanel = resolvePanelIdxForPathPoint(b, link, (link.path?.length || 1) - 1);
+
+        const isA = (a.q === q && a.r === r && aPanel === panelIdx);
+        const isB = (b.q === q && b.r === r && bPanel === panelIdx);
+
+        if (isA) {
+          const keyB = `${bPanel}|${b.q},${b.r}`;
+          if (!App.excludedHexKeys.has(keyB)) App.neighborKeySet.add(keyB); // ★ NEW
+        }
+        if (isB) {
+          const keyA = `${aPanel}|${a.q},${a.r}`;
+          if (!App.excludedHexKeys.has(keyA)) App.neighborKeySet.add(keyA); // ★ NEW
+        }
+      }
     }
 
     App.subspaceSvgs.forEach((svg, panelIdx) => {
@@ -807,21 +840,54 @@ export async function initSemanticMap({
         const path = d3.select(this).select('path');
         let opacity = STYLE.OPACITY_DEFAULT;
 
-        const isPersistent = App.persistentHexKeys.has(pkey(panelIdx, d.q, d.r));
-        const isNeighbor   = App.neighborKeySet.has(pkey(panelIdx, d.q, d.r));
+        const key = pkey(panelIdx, d.q, d.r);
+        const isExcluded   = App.excludedHexKeys.has(key);           // ★ NEW
+        const isPersistent = App.persistentHexKeys.has(key);
+        const isNeighbor   = App.neighborKeySet.has(key);
         const isHovered    = App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r;
         const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
         const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
 
-        if (isPersistent || isFlightStart || isFlightHover || isHovered) {
+        if (isExcluded) {
+          opacity = STYLE.OPACITY_DEFAULT;                 // ★ NEW：排除优先级最高 → 恢复默认
+        } else if (isPersistent || isFlightStart || isFlightHover || isHovered) {
           opacity = STYLE.OPACITY_HOVER;
         } else if (isNeighbor) {
           opacity = STYLE.OPACITY_NEIGHBOR;
         }
+
+        // 你之前用的是 style('fill-opacity', …)，建议统一用 attr，避免某些情况下被 CSS 覆盖
         path.attr('fill-opacity', opacity);
       });
+
     });
   }
+
+  // 仅取“一跳”邻居（不做整片扩展），返回 Set<"panelIdx|q,r">
+  function starKeys(panelIdx, q, r) {
+    const adj = buildUndirectedAdjacency();
+    const me = `${panelIdx}|${q},${r}`;
+    const out = new Set([me]);
+
+    // 邻居：来自无向邻接表（roads/rivers，跨 panel 时也会带 panelIdx）
+    const nbs = adj.get(me);
+    if (nbs && nbs.size) nbs.forEach(k => out.add(k));
+
+    // 若需要把 flight 端点也视为“一跳”，加上这段：
+    for (const link of (App._lastLinks || [])) {
+      if (link.type !== 'flight') continue;
+      const a = link.path?.[0];
+      const b = link.path?.[link.path.length - 1];
+      if (!a || !b) continue;
+      const aPanel = resolvePanelIdxForPathPoint(a, link, 0);
+      const bPanel = resolvePanelIdxForPathPoint(b, link, (link.path?.length || 1) - 1);
+      if (aPanel === panelIdx && a.q === q && a.r === r) out.add(`${bPanel}|${b.q},${b.r}`);
+      if (bPanel === panelIdx && b.q === q && b.r === r) out.add(`${aPanel}|${a.q},${a.r}`);
+    }
+
+    return out;
+}
+
 
   /* =========================
    * 交互/快照
@@ -849,6 +915,60 @@ export async function initSemanticMap({
     return adj;
   }
 
+  // ==== NEW: 基于“整条线路”的 star：返回所有“包含 (panelIdx,q,r)” 的线路上所有点 ====
+  function lineStarKeys(panelIdx, q, r, opts = { includeFlight: false }) {
+    const result = new Set();
+    const matchAt = (pt, link, i) => {
+      const pIdx = resolvePanelIdxForPathPoint(pt, link, i);
+      return pIdx === panelIdx && pt.q === q && pt.r === r;
+    };
+
+    (App._lastLinks || []).forEach(link => {
+      if (!opts.includeFlight && link.type === 'flight') return; // 如需把航线也纳入一跳，改为 true
+      const path = Array.isArray(link.path) ? link.path : [];
+      if (!path.length) return;
+
+      // 该线路是否包含点击点
+      const hit = path.some((pt, i) => matchAt(pt, link, i));
+      if (!hit) return;
+
+      // 把该线路全路径上的点加入选中集
+      path.forEach((pt, i) => {
+        const pIdx = resolvePanelIdxForPathPoint(pt, link, i);
+        result.add(pkey(pIdx, pt.q, pt.r));
+      });
+    });
+
+    return result; // Set<"panelIdx|q,r">
+  }
+
+
+  // 计算某点的一跳邻居（含自身）
+  function computeOneHopStar(panelIdx, q, r) {
+    const center = pkey(panelIdx, q, r);
+    const adj = buildUndirectedAdjacency();      // 基于全部 links（road/river/flight）构建无向图
+    const star = new Set([center]);
+    const nbs = adj.get(center);
+    if (nbs && nbs.size) {
+      nbs.forEach(nb => star.add(nb));
+    }
+    return star;  // Set<"panel|q,r">
+  }
+
+
+  // 基于当前边集，返回 “以 (panelIdx,q,r) 为中心的一跳星选集合（含自身）”
+  function getStarKeys(panelIdx, q, r) {
+    const adj = buildUndirectedAdjacency();
+    const k = `${panelIdx}|${q},${r}`;
+    const star = new Set([k]);
+    const nbs = adj.get(k);
+    if (nbs && nbs.size) {
+      for (const nb of nbs) star.add(nb);
+    }
+    return star;
+  }
+
+
   function findEndpointMate(panelIdx, q, r) {
     const k = (p, q, r) => `${p}|${q},${r}`;
     for (const e of (App._lastLinks || [])) {
@@ -874,10 +994,11 @@ export async function initSemanticMap({
   }
 
   function removeSingleNode(panelIdx, q, r) {
-    App.persistentHexKeys.delete(pkey(panelIdx, q, r));
+    const key = pkey(panelIdx, q, r);
+    App.persistentHexKeys.delete(key);
+    App.excludedHexKeys.add(key);  // ★ NEW：标记为排除，使其不再被邻居高亮
   }
 
-  
 
   // ★ NEW：从某个 key 出发，拿到“整条连通分量”（Set<key>）
    function getComponentKeysFrom(adj, startKey) {
@@ -894,17 +1015,25 @@ export async function initSemanticMap({
  
    // ★ NEW：批量选中/取消一个点所在的整条连通分量
    function selectComponent(panelIdx, q, r) {
-     const k = pkey(panelIdx, q, r);
-     const adj = buildUndirectedAdjacency();
-     const comp = getComponentKeysFrom(adj, k);
-     comp.forEach(kk => App.persistentHexKeys.add(kk));
-   }
-   function deselectComponent(panelIdx, q, r) {
-     const k = pkey(panelIdx, q, r);
-     const adj = buildUndirectedAdjacency();
-     const comp = getComponentKeysFrom(adj, k);
-     comp.forEach(kk => App.persistentHexKeys.delete(kk));
-   }
+      const k = pkey(panelIdx, q, r);
+      const adj = buildUndirectedAdjacency();
+      const comp = getComponentKeysFrom(adj, k);
+      comp.forEach(kk => {
+        App.persistentHexKeys.add(kk);
+        App.excludedHexKeys.delete(kk);   // ★ NEW：被选中的点不应再保留“排除”标记
+      });
+    }
+
+    function deselectComponent(panelIdx, q, r) {
+      const k = pkey(panelIdx, q, r);
+      const adj = buildUndirectedAdjacency();
+      const comp = getComponentKeysFrom(adj, k);
+      comp.forEach(kk => {
+        App.persistentHexKeys.delete(kk);
+        //（可选）也可以把 comp 内的排除清掉，看你的需求：
+        // App.excludedHexKeys.delete(kk);
+      });
+    }
 
   function snapshotFromKeySet(keySet) {
     if (!keySet || keySet.size === 0) return { nodes: [], links: [] };
@@ -997,25 +1126,23 @@ export async function initSemanticMap({
         App.selectedHex = { panelIdx, q, r };
       }
     } else {
-      // Ctrl/⌘：单点切 + 端点配对切
+      // Ctrl / ⌘：一跳星选 + 单点反选
       if (App.persistentHexKeys.has(k)) {
-        removeSingleNode(panelIdx, q, r);     // 只移除当前点
+        removeSingleNode(panelIdx, q, r);     // ← 内含加入 excludedHexKeys
       } else {
-        const mate = findEndpointMate(panelIdx, q, r); // 若为端点则成对选
-        if (mate.found) {
-          App.persistentHexKeys.add(k);
-          App.persistentHexKeys.add(mate.mateKey);
-        } else {
-          App.persistentHexKeys.add(k);
-        }
+        // 未选：用 star(x) 替换整个选中集
+        const star = starKeys(panelIdx, q, r);
+        App.persistentHexKeys.clear();
+        App.excludedHexKeys.clear();          // ★ NEW：做“替换”时清空排除集
+        star.forEach(s => App.persistentHexKeys.add(s));
         App.selectedHex = { panelIdx, q, r };
       }
     }
 
     updateHexStyles();
-    publishToStepAnalysis();   // ← 这会把当前高亮集快照传给右侧
+    publishToStepAnalysis(); // 右侧 pane 用 snapshot 同步
   }
-
+  
   function handleDoubleClick(panelIdx, q, r, event) {
     const here = { panelIdx, q, r };
 
