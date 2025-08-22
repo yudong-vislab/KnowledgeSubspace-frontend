@@ -2,7 +2,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref, nextTick } from 'vue'
 import { initSemanticMap } from '../lib/semanticMap'
-import { fetchSemanticMap, createSubspace, renameSubspace } from '../lib/api'
+import { fetchSemanticMap, createSubspace, renameSubspace, renameMapTitle } from '../lib/api'
 import { emitSelectionSaved } from '../lib/selectionBus'
 
 const outerRef = ref(null)
@@ -26,6 +26,10 @@ onMounted(async () => {
   controller.setOnSubspaceRename(async (idx, newName) => {
     await renameSubspace(idx, newName)
   })
+  // 主标题重命名时通知后端（若你的 API 路径不同，改成你的函数即可）
+  controller.setOnMainTitleRename?.(async (newTitle) => {
+    try { await renameMapTitle(newTitle) } catch (e) { console.warn(e) }
+  })
   ready.value = true
 })
 
@@ -43,6 +47,9 @@ function onSave() {
 
   // 获取带 connected:true 的快照
   const snap = controller.getSelectionSnapshot?.() || { nodes: [], links: [] }
+  const titleText = (mainTitleRef.value?.textContent || '').trim() || 'Semantic Map'
+  const createdAt = Date.now()
+
 
   // —— 打印筛选结果 —— //
   console.groupCollapsed('[SemanticMap] Selection Snapshot')
@@ -51,7 +58,7 @@ function onSave() {
   console.groupEnd()
 
   // —— 广播给右侧 —— //
-  emitSelectionSaved(snap)
+  emitSelectionSaved({ ...snap, title: titleText, createdAt })
 }
 
 
@@ -64,9 +71,9 @@ function onSave() {
 
       <!-- 👇 模式按钮条（新增） -->
       <div class="mode-toolbar">
-        <button id="mode-btn-select" class="mode-btn" type="button" title="Select the connected cluster">Group Select</button>
+        <button id="mode-btn-select" class="mode-btn" type="button" title="Select the connected route group">Group Select</button>
         <button id="mode-btn-route"  class="mode-btn" type="button" title="Select an entire route (Ctrl/⌘)">Route Select</button>
-        <button id="mode-btn-insert" class="mode-btn" type="button" title="Arm Connect (Ctrl+Shift), then click to start">Connect</button>
+        <button id="mode-btn-insert" class="mode-btn" type="button" title="Arm Connect (Ctrl/⌘+Shift), then click to start">Connect</button>
       </div>
 
       <div class="mv-actions">
@@ -102,7 +109,7 @@ function onSave() {
   display: flex;
   align-items: center;
   justify-content: space-between; /* 左侧标题 & 右侧按钮 */
-  padding: 8px 12px;
+  padding: 8px;
   background: #fff;     /* 固定栏底色 */
   border-bottom: 1px solid #eee;
 }
@@ -185,6 +192,38 @@ function onSave() {
   border-color:#eec316;
   color:#fff; opacity:1;
 }
+
+/* —— 主标题默认态：与 subspace-title 的非编辑态保持风格一致 —— */
+.mv-title.editable-title {
+  cursor: text;                /* 双击后会进入编辑，保持 I-beam 语义 */
+  font-size: 16px;
+  color: #333;
+  margin: 5px 0 2px 0;
+  pointer-events: auto;
+  user-select: none;           /* 非编辑态避免误选 */
+  position: relative;
+  z-index: 20;
+  /* padding: 6px 8px; */
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  background: transparent;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+
+/* —— 主标题编辑态：完全复刻 subspace-title 的编辑效果 —— */
+.mv-title.editable-title[contenteditable="plaintext-only"] {
+  cursor: text;
+  user-select: text;           /* 编辑态允许选中文本 */
+  outline: none;
+  background: #eef2ff;         /* 淡蓝底 */
+  border-color: #c7d2fe;       /* 虚线边框显色 */
+}
+
+/* （可选）编辑态悬停更明显一点，与 subspace-title 保持一致 */
+.mv-title.editable-title[contenteditable="plaintext-only"]:hover {
+  border-color: #a5b4fc;
+}
+
 
 
 </style>

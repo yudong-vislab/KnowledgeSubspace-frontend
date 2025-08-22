@@ -23,3 +23,12 @@ export async function renameSubspace(idx, name) {
   if (!res.ok) throw new Error('Failed to rename subspace');
   return res.json();
 }
+
+export async function renameMapTitle(newTitle){
+  // 按你的真实 API 调整 URL / method / body
+  await fetch('/api/semantic-map/title', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({ title: newTitle })
+  })
+}

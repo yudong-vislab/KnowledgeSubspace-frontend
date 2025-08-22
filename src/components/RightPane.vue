@@ -54,10 +54,18 @@ let offSaved = null
 onMounted(() => {
   offSaved = onSelectionSaved((payload) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    // 计算“自增 Step N · 主标题” —— N = push 前长度 + 1
+    const nextIdx = steps.value.length + 1
+    const baseTitle = (payload.title || '').trim()
+    const finalTitle = baseTitle
+      ? `Step ${nextIdx} · ${baseTitle}`
+      : `Step ${nextIdx} · ${new Date(payload.createdAt || Date.now()).toLocaleTimeString()}`
+
+
     // 直接用 semanticMap 的快照结构：{nodes, links}
     steps.value.push({
       id,
-      title: payload.title || '',
+      title: finalTitle,                 // 存入带 Step N 的最终标题
       createdAt: payload.createdAt || Date.now(),
       nodes: Array.isArray(payload.nodes) ? payload.nodes : [],
       links: Array.isArray(payload.links) ? payload.links : [],
