@@ -130,12 +130,13 @@ export async function initSemanticMap({
     _clickTimer: null,
     _awaitingSingle: false,   // ★ NEW：是否在等待触发单击处理
     _lastClickAt: 0,          // ★ NEW：最近一次 click 的时间戳（非必须，但留作需要）
+    insertMode: null, 
 
     // 选中与快照
     persistentHexKeys: new Set(),
     excludedHexKeys: new Set(),
     selectedRouteIds: new Set(),   // ★ 新增：当前被选中的“整条线路”的 id 集合（统计 road/river/flight）
-
+    modKeys: { ctrl: false, meta: false, shift: false },
     _lastSnapshot: null,
 
     // 回调 & 容器
@@ -154,7 +155,7 @@ export async function initSemanticMap({
    * 小工具
    * ========================= */
   const pkey = (panelIdx, q, r) => `${panelIdx}|${q},${r}`;
-  const pointId = (panelIdx, q, r) => `${panelIdx}:${q},${r}`;
+  // const pointId = (panelIdx, q, r) => `${panelIdx}:${q},${r}`;
   const isCtrlLike = (e) => !!(e.metaKey || e.ctrlKey);
 
   const styleOf = (t) =>
@@ -234,6 +235,119 @@ export async function initSemanticMap({
     return 0;
   }
 
+  function findLinkById(routeId){
+    return (App._lastLinks || []).find(l => linkKey(l) === routeId) || null;
+  }
+  function findSelectedRouteContaining(panelIdx, q, r){
+    // 在已选路线中找包含这个点的路线
+    for (const l of (App._lastLinks || [])) {
+      if (!App.selectedRouteIds.has(linkKey(l))) continue;
+      if (linkContainsNode(l, panelIdx, q, r)) return l;
+    }
+    return null;
+  }
+  function indexOfPointInLink(link, panelIdx, q, r){
+    const path = Array.isArray(link?.path) ? link.path : [];
+    for (let i=0;i<path.length;i++){
+      const p = path[i];
+      const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+      if (pIdx === panelIdx && p.q === q && p.r === r) return i;
+    }
+    return -1;
+  }
+  // 插入一个点到 link.path 的 anchorIndex 之后
+  function insertPointAfter(link, anchorIndex, panelIdx, q, r){
+    if (!link || !Array.isArray(link.path)) return;
+    // 已存在就跳过
+    if (indexOfPointInLink(link, panelIdx, q, r) >= 0) return;
+
+    const newPt = { q, r, panelIdx };
+    // 注意：保留 flight 的两端 panelIdxFrom/To，不需要改动
+    const insertAt = Math.max(0, Math.min(anchorIndex + 1, link.path.length));
+    link.path.splice(insertAt, 0, newPt);
+    // anchor 往后移动一个，方便继续“顺序加点”
+    App.insertMode.anchorIndex = insertAt; 
+  }
+
+  // —— Mode UI：按钮状态（绿色=active，黄色=armed），无 HUD/Chip —— //
+  const ModeUI = (() => {
+    const btnSel   = document.getElementById('mode-btn-select');
+    const btnRoute = document.getElementById('mode-btn-route');
+    const btnConn  = document.getElementById('mode-btn-insert'); // Connect
+
+    // 统一清理三个按钮的状态类
+    function clearAll() {
+      [btnSel, btnRoute, btnConn].forEach(b => {
+        if (!b) return;
+        b.classList.remove('is-active', 'is-armed');
+      });
+    }
+
+    /**
+     * setVisualState 根据当前“事实状态”上色：
+     *  - connectActive：已进入插入/连线（insertMode 或 flightStart）
+     *  - connectArmed：Ctrl+Shift 按下，但尚未点第一个点
+     *  - routeActive：Ctrl/⌘ 按下（且不在 connect 状态）
+     *  - 其余默认：Cluster Select 绿色
+     */
+    function setVisualState({ connectActive=false, connectArmed=false, routeActive=false } = {}) {
+      clearAll();
+      if (connectActive) {
+        btnConn?.classList.add('is-active');       // 绿
+        return;
+      }
+      if (connectArmed) {
+        btnConn?.classList.add('is-armed');        // 黄
+        return;
+      }
+      if (routeActive) {
+        btnRoute?.classList.add('is-active');      // 绿
+        return;
+      }
+      btnSel?.classList.add('is-active');          // 绿（默认）
+    }
+
+    /**
+     * computeAndApply 从“键盘/应用状态”推导视觉态：
+     *  - armed：CtrlLike + Shift（且没进入 active）
+     *  - active：insertMode 存在 或 flightStart 存在
+     *  - route：CtrlLike（且不 armed/active）
+     */
+    function computeAndApply(overrides = null) {
+     // 允许显式覆盖（极少用），否则默认读取 App.modKeys
+      const { ctrl, meta, shift } = overrides || App.modKeys;
+      const ctrlLike = !!(ctrl || meta);
+      const connectActive = !!(App.insertMode || App.flightStart);
+      const connectArmed = !connectActive && ctrlLike && !!shift;
+      const routeActive  = !connectActive && !connectArmed && ctrlLike;
+      setVisualState({ connectActive, connectArmed, routeActive });
+    }
+
+    return { setVisualState, computeAndApply };
+  })();
+
+
+
+
+  function beginInsertMode(route, anchorIdx){
+    App.insertMode = { routeId: linkKey(route), anchorIndex: anchorIdx, inserting: true };
+    ModeUI.computeAndApply();   // 让 Connect 变绿
+  }
+
+  function endInsertMode(commit = true){
+    App.insertMode = null;
+
+    if (commit) {
+      // 成功提交后刷新
+      drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+      recomputePersistentFromRoutes();
+      updateHexStyles();
+      publishToStepAnalysis();
+    }
+    ModeUI.computeAndApply({});   // 根据当前修饰键/状态回落到 Route 或 Cluster
+  }
+
+
   // === 路线级选择：辅助 ===
   function linkKey(link){
     return link?.id || link?._uid || '';
@@ -301,6 +415,38 @@ export async function initSemanticMap({
       cities: svgSel.select('g.overlay-root').select('g.cities'),
     };
   }
+
+  // —— 全局键盘监听：键盘抬起后的自动切换 —— //
+  function wireKeyboardHints() {
+    const setFromEvent = (e, down) => {
+      // 只认修饰键，其他键忽略
+      if (e.key === 'Control') App.modKeys.ctrl = down;
+      if (e.key === 'Meta')    App.modKeys.meta = down;
+      if (e.key === 'Shift')   App.modKeys.shift = down;
+      ModeUI.computeAndApply();  // ← 读取 App.modKeys，自动回落
+    };
+ 
+    const onKeyDown = (e) => setFromEvent(e, true);
+    const onKeyUp   = (e) => setFromEvent(e, false);
+ 
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', onKeyUp);
+    cleanupFns.push(() => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('keyup', onKeyUp);
+    });
+ 
+    // 窗口失焦时重置（防止“卡住 Ctrl/Shift”）
+    const onBlur = () => { App.modKeys = { ctrl:false, meta:false, shift:false }; ModeUI.computeAndApply(); };
+    window.addEventListener('blur', onBlur);
+    cleanupFns.push(() => window.removeEventListener('blur', onBlur));
+ 
+    // 初始化：默认 Cluster 绿
+    App.modKeys = { ctrl:false, meta:false, shift:false };
+    ModeUI.computeAndApply();
+  }
+
+  wireKeyboardHints();
 
   function createSubspaceElement(space, i) {
     const div = document.createElement('div');
@@ -556,10 +702,12 @@ export async function initSemanticMap({
             if (event.detail && event.detail > 1) return;
             if (App._clickTimer) clearTimeout(App._clickTimer);
 
-            const withCtrl = isCtrlLike(event);   // ← 这里用 Ctrl/Meta
+            const withCtrl = isCtrlLike(event);
+            const withShift = !!event.shiftKey;
             App._clickTimer = setTimeout(() => {
-              handleSingleClick(panelIdx, d.q, d.r, withCtrl);
+              handleSingleClick(panelIdx, d.q, d.r, withCtrl, withShift);
             }, STYLE.CLICK_DELAY);
+
           }).on('dblclick', (event, d) => {
             event.preventDefault(); event.stopPropagation();
             if (App._clickTimer) { clearTimeout(App._clickTimer); App._clickTimer = null; }
@@ -867,12 +1015,11 @@ export async function initSemanticMap({
         const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
         const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
 
-        if (isExcluded) {
-          opacity = STYLE.OPACITY_DEFAULT;                 // 被排除：恢复默认
-        } else if (isSelected || isFlightStart || isFlightHover || isHovered) {
-          opacity = STYLE.OPACITY_HOVER;                   // 在选集 or 临时交互：高亮
+        if (isHovered || isFlightStart || isFlightHover || isSelected) {
+          opacity = STYLE.OPACITY_HOVER;
         } else {
-          opacity = STYLE.OPACITY_DEFAULT;                 // 其余：默认
+          // 其余情况都按默认；被排除只是在“非交互态”时保持默认不亮
+          opacity = STYLE.OPACITY_DEFAULT;
         }
 
         path.attr('fill-opacity', opacity);
@@ -1193,8 +1340,37 @@ export async function initSemanticMap({
   }
 
 
-  function handleSingleClick(panelIdx, q, r, withCtrl = false) {
+  function handleSingleClick(panelIdx, q, r, withCtrl = false, withShift = false) {
     const k = pkey(panelIdx, q, r);
+
+    // —— 插入模式：优先处理 ——————————————————————————————
+    if (App.insertMode) {
+      const link = findLinkById(App.insertMode.routeId);
+      if (!link) { App.insertMode = null; } 
+      else {
+        // 如果点到的是“另一端终点”（或你规定的结束点），就结束并提交
+        const isEndpoint =
+          indexOfPointInLink(link, panelIdx, q, r) === 0 ||
+          indexOfPointInLink(link, panelIdx, q, r) === link.path.length - 1;
+        // 中间过程：Shift 点击添加，允许不按 Ctrl
+        if (withShift && !isEndpoint) {
+          insertPointAfter(link, App.insertMode.anchorIndex, panelIdx, q, r);
+          // 每次添加立即重绘
+          drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+          recomputePersistentFromRoutes();
+          updateHexStyles();
+          publishToStepAnalysis();
+          return;
+        }
+        // 以 Ctrl Shift 点击终点（或任意你定义的“结束动作”）结束
+        if (withCtrl && withShift && isEndpoint) {
+          endInsertMode(true);
+          return;
+        }
+      }
+      // 插入模式存在但没命中规则，继续走普通分支
+    }
+
 
     if (!withCtrl) {
       // 普通单击：整片切（连通分量切换）
@@ -1208,6 +1384,24 @@ export async function initSemanticMap({
         App.selectedHex = { panelIdx, q, r };
       }
     } else {
+      // === Ctrl   Shift：如果当前选中了路线，并在其某个点（常用：起点）上，进入插入模式
+      if (withShift) {
+        // 从已选路线中，找包含当前点击点的那条（常见：只有 1 条）
+        const route = findSelectedRouteContaining(panelIdx, q, r);
+        if (route) {
+          const idx = indexOfPointInLink(route, panelIdx, q, r);
+          if (idx >= 0) {
+            beginInsertMode(route, idx);
+            // 把这条路线的所有节点加入高亮，避免视觉混乱
+            App.selectedHex = { panelIdx, q, r };
+            recomputePersistentFromRoutes();
+            updateHexStyles();
+            return; // 进入模式后返回
+          }
+        }
+        // 没找到包含该点的已选路线，就继续走下面的“整条路线选择/排除”逻辑
+      }
+  
     // ★★★ Ctrl / ⌘：按“整条线路”选择；若该点已在高亮里 => 仅排除此点
     const key = pkey(panelIdx, q, r);
 
@@ -1291,6 +1485,8 @@ export async function initSemanticMap({
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
     updateHexStyles();
     publishToStepAnalysis();
+
+    ModeUI.computeAndApply({});
   }
 
 
@@ -1351,6 +1547,15 @@ export async function initSemanticMap({
       e.preventDefault();
     });
 
+    const onKeyDownGlobal = (e) => {
+      if (!App.insertMode) return;
+      if (e.key === 'Escape') { endInsertMode(false); }
+      if (e.key === 'Enter')  { endInsertMode(true);  }
+    };
+    document.addEventListener('keydown', onKeyDownGlobal);
+    cleanupFns.push(() => document.removeEventListener('keydown', onKeyDownGlobal));
+
+
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
 
@@ -1402,7 +1607,7 @@ export async function initSemanticMap({
     observePanelResize();
     updateHexStyles();
     publishToStepAnalysis();
-
+    ModeUI.computeAndApply({});
     const resizeHandler = () => {
       (data.subspaces || []).forEach((space, i) => renderHexGridFromData(i, space, App.config.hex.radius));
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
@@ -1443,9 +1648,11 @@ export async function initSemanticMap({
       App.persistentHexKeys.clear();  // ★ 新增
       // ★ 清空后也要重画，恢复默认线路形态
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
-      
       updateHexStyles();
       publishToStepAnalysis();
+
+      // UI 复位
+      ModeUI.computeAndApply({});
     }
   };
   const onBlankDblClick = (e) => {

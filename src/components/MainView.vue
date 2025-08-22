@@ -60,11 +60,18 @@ function onSave() {
 <template>
   <div class="mainview">
     <header class="mv-header">
-      <h2 class="mv-title editable-title" ref="mainTitleRef">Semantic Map</h2>
+      <h2 class="mv-title editable-title" ref="mainTitleRef">Semantic Map View</h2>
+
+      <!-- 👇 模式按钮条（新增） -->
+      <div class="mode-toolbar">
+        <button id="mode-btn-select" class="mode-btn" type="button" title="Select the connected cluster">Group Select</button>
+        <button id="mode-btn-route"  class="mode-btn" type="button" title="Select an entire route (Ctrl/⌘)">Route Select</button>
+        <button id="mode-btn-insert" class="mode-btn" type="button" title="Arm Connect (Ctrl+Shift), then click to start">Connect</button>
+      </div>
+
       <div class="mv-actions">
         <button class="add-btn" @click="onAddSubspace" title="Add subspace">＋</button>
         <button class="filter-btn" title="Filter">Filter</button>
-        <!-- 把 save 按钮绑上 onSave -->
         <button class="save-btn" title="Save" @click="onSave">Save</button>
       </div>
     </header>
@@ -150,6 +157,34 @@ function onSave() {
   scrollbar-color: rgba(0,0,0,.25) transparent;
 }
 
+.mode-toolbar{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin-left:12px;   /* 让按钮与标题有点间距 */
+}
+
+.mode-btn{
+  background:#f3f5f7; color:#334;
+  border:1px solid #e3e7ee;
+  border-radius:999px;
+  padding:6px 10px; font-size:12px; line-height:1;
+  cursor:default; opacity:.7; user-select:none;
+}
+
+/* 活动态（绿色） */
+.mode-btn.is-active{
+  background:#379b61;      /* 绿色 */
+  border-color:#379b61;
+  color:#fff; opacity:1;
+}
+
+/* 触发中/预备（黄色） */
+.mode-btn.is-armed{
+  background:#eec316;      /* 黄色 */
+  border-color:#eec316;
+  color:#fff; opacity:1;
+}
 
 
 </style>
