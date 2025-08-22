@@ -127,6 +127,7 @@ export async function initSemanticMap({
     flightStart: null,
     flightHoverTarget: null,
     hoveredHex: null,
+    highlightedHexKeys: new Set(),  // ★ NEW：仅用于 hover 预览
     _clickTimer: null,
     _awaitingSingle: false,   // ★ NEW：是否在等待触发单击处理
     _lastClickAt: 0,          // ★ NEW：最近一次 click 的时间戳（非必须，但留作需要）
@@ -310,6 +311,119 @@ export async function initSemanticMap({
       });
     }
 
+    // —— NEW：强制默认 = Group Select（无修饰键、无路由/连线偏好） —— //
+    function forceGroupDefault() {
+      App.uiPref.route = false;
+      App.uiPref.connectArmed = false;
+      App.insertMode = null;
+      App.flightStart = null;
+      App.modKeys = { ctrl:false, meta:false, shift:false };
+      // 显示：Group 按钮绿；行为：单击走 Group 选择
+      computeAndApply({ ctrl:false, meta:false, shift:false });
+    }
+
+
+    // —— 预览工具：根据当前模式，计算鼠标悬停点应该高亮的 key 集 —— //
+    function computeHoverPreview(panelIdx, q, r, { withCtrl=false, withShift=false } = {}) {
+      const ctrlLike   = !!withCtrl;
+      const armedNow   = isConnectArmedNow(withCtrl, withShift);   // 键盘(Ctrl+Shift) 或 按钮黄灯
+      const routeMode  = isRouteMode(ctrlLike);                    // 键盘(Ctrl/⌘) 或 按钮 Route 绿灯
+
+      const result = new Set();
+
+      // —— Connect Active（已进入插入）优先 —— //
+      if (App.insertMode) {
+        // 尚未选锚点：提示“可作为锚点”的整条路线
+        if (App.insertMode.awaitingAnchor) {
+          (App._lastLinks || []).forEach(link => {
+            if (!isSelectableRoute(link)) return;
+            if (linkContainsNode(link, panelIdx, q, r)) {
+              (link.path||[]).forEach((p,i) => {
+                const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+                result.add(pkey(pIdx, p.q, p.r));
+              });
+            }
+          });
+          return result;
+        }
+
+        // 已有锚点：高亮当前 route 全路径；并依据 armed/端点给出暗示
+        const link = findLinkById(App.insertMode.routeId);
+        if (link && Array.isArray(link.path)) {
+          link.path.forEach((p,i) => {
+            const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+            result.add(pkey(pIdx, p.q, p.r));
+          });
+
+          const iIn = indexOfPointInLink(link, panelIdx, q, r);
+          if (iIn >= 0) {
+            const isEnd = (iIn === 0 || iIn === link.path.length - 1);
+            if (isEnd && (armedNow || (withCtrl && withShift))) {
+              const mate = findEndpointMate(panelIdx, q, r);
+              if (mate.found) result.add(mate.mateKey);
+            } else {
+              const aIdx = App.insertMode.anchorIndex;
+              if (aIdx >= 0) {
+                const anchor = link.path[aIdx];
+                const pIdxA  = resolvePanelIdxForPathPoint(anchor, link, aIdx);
+                starKeys(pIdxA, anchor.q, anchor.r).forEach(k => result.add(k));
+              }
+              starKeys(panelIdx, q, r).forEach(k => result.add(k));
+            }
+          }
+        }
+        return result;
+      }
+
+      // —— Connect Armed（黄灯但未进入 active） —— //
+      if (armedNow && !isConnectActive()) {
+        (App._lastLinks || []).forEach(link => {
+          if (!isSelectableRoute(link)) return;
+          if (linkContainsNode(link, panelIdx, q, r)) {
+            (link.path||[]).forEach((p,i) => {
+              const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+              result.add(pkey(pIdx, p.q, p.r));
+            });
+          }
+        });
+        return result;
+      }
+
+      // —— Route 模式 —— //
+      if (routeMode) {
+        let added = false;
+        (App._lastLinks || []).forEach(link => {
+          if (!isSelectableRoute(link)) return;
+          if (isStartOfLink(link, panelIdx, q, r)) {
+            (link.path||[]).forEach((p,i) => {
+              const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+              result.add(pkey(pIdx, p.q, p.r));
+            });
+            added = true;
+          }
+        });
+        if (!added) {
+          (App._lastLinks || []).forEach(link => {
+            if (!isSelectableRoute(link)) return;
+            if (linkContainsNode(link, panelIdx, q, r)) {
+              (link.path||[]).forEach((p,i) => {
+                const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+                result.add(pkey(pIdx, p.q, p.r));
+              });
+            }
+          });
+        }
+        return result;
+      }
+
+      // —— Group（默认）：整条连通分量 —— //
+      getComponentKeysFrom(buildUndirectedAdjacency(), pkey(panelIdx, q, r))
+        .forEach(k => result.add(k));
+
+      return result;
+    }
+
+
     /**
      * setVisualState 根据当前“事实状态”上色：
      *  - connectActive：已进入插入/连线（insertMode 或 flightStart）
@@ -364,19 +478,23 @@ export async function initSemanticMap({
       const routeActive  = !connectActive && !connectArmed && ( ctrlLike || App.uiPref.route );
 
       setVisualState({ connectActive, connectArmed, routeActive });
+
+      // ★ 模式视觉态变化后，如有悬停，刷新一次预览
+      if (App.hoveredHex) {
+        const { panelIdx, q, r } = App.hoveredHex;
+        const ctrlLike = overrides ? !!(overrides.ctrl || overrides.meta) : !!(App.modKeys.ctrl || App.modKeys.meta);
+        const shift    = overrides ? !!overrides.shift : !!App.modKeys.shift;
+        App.highlightedHexKeys = ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl: ctrlLike, withShift: shift });
+        updateHexStyles();
+      }
+
     }
 
     // 鼠标状态
     function wireButtons() {
       if (btnSel) {
         btnSel.addEventListener('click', () => {
-          // 全回落到“Cluster Select”
-          App.uiPref.route = false;
-          App.uiPref.connectArmed = false;
-          // 若当前是 active（正在插入/航线），点击 Select 等价于取消 active
-          if (App.insertMode)  endInsertMode(false);
-          if (App.flightStart) { App.flightStart = null; drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false); }
-          ModeUI.computeAndApply();
+          forceGroupDefault();
         });
       }
       if (btnRoute) {
@@ -394,8 +512,7 @@ export async function initSemanticMap({
           // 点 Route：关掉 Connect 黄灯，点亮 Route 绿灯
           App.uiPref.connectArmed = false;
           App.uiPref.route = true;
-          ModeUI.computeAndApply();
-
+          computeAndApply();
         });
       }
 
@@ -408,7 +525,7 @@ export async function initSemanticMap({
             // ① 空 → 黄（armed）
             App.uiPref.connectArmed = true;
             App.uiPref.route = false;        // 黄灯时不和 Route 抢态
-            ModeUI.computeAndApply();
+            computeAndApply();
             return;
           }
 
@@ -417,7 +534,7 @@ export async function initSemanticMap({
             App.uiPref.connectArmed = false;
             // ★ 进入“等待锚点”的插入态（先点到一条路线上的节点作为锚点）
             App.insertMode = { routeId: null, anchorIndex: -1, inserting: true, awaitingAnchor: true };
-            ModeUI.computeAndApply();
+            computeAndApply();
             return;
           }
 
@@ -428,7 +545,7 @@ export async function initSemanticMap({
             App.uiPref.connectArmed = false;
             App.uiPref.route = false;
             drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
-            ModeUI.computeAndApply();
+            computeAndApply();
             return;
           }
         });
@@ -436,9 +553,10 @@ export async function initSemanticMap({
     }
     wireButtons();
 
+    // 让页面一进来就是 Group 绿灯（默认态）
+    forceGroupDefault();
 
-
-    return { setVisualState, computeAndApply };
+    return { setVisualState, computeAndApply, forceGroupDefault, computeHoverPreview };
   })();
 
 
@@ -539,6 +657,17 @@ export async function initSemanticMap({
       if (e.key === 'Meta')    App.modKeys.meta = down;
       if (e.key === 'Shift')   App.modKeys.shift = down;
       ModeUI.computeAndApply();  // ← 读取 App.modKeys，自动回落
+
+      // ★ 若正在悬停，重算预览
+      if (App.hoveredHex) {
+        const { panelIdx, q, r } = App.hoveredHex;
+        App.highlightedHexKeys = computeHoverPreview(panelIdx, q, r, {
+          withCtrl: (App.modKeys.ctrl || App.modKeys.meta),
+          withShift: App.modKeys.shift
+        });
+        updateHexStyles();
+      }
+
     };
  
     const onKeyDown = (e) => setFromEvent(e, true);
@@ -552,7 +681,14 @@ export async function initSemanticMap({
     });
  
     // 窗口失焦时重置（防止“卡住 Ctrl/Shift”）
-    const onBlur = () => { App.modKeys = { ctrl:false, meta:false, shift:false }; ModeUI.computeAndApply(); };
+    // 窗口失焦时：清干净修饰键 + 关闭 Route/Connect 偏好，并回到 Group
+    const onBlur = () => {
+      App.modKeys = { ctrl:false, meta:false, shift:false };
+      App.uiPref.route = false;
+      App.uiPref.connectArmed = false;
+      ModeUI.forceGroupDefault();
+    };
+
     window.addEventListener('blur', onBlur);
     cleanupFns.push(() => window.removeEventListener('blur', onBlur));
  
@@ -798,6 +934,11 @@ export async function initSemanticMap({
           g.on('mouseover', (event, d) => {
             App.hoveredHex = { panelIdx, q: d.q, r: d.r };
             if (App.flightStart) App.flightHoverTarget = { panelIdx, q: d.q, r: d.r };
+            // ★ 根据当前键位/按钮状态计算预览
+            const withCtrl  = isCtrlLike(event);
+            const withShift = !!event.shiftKey;
+            App.highlightedHexKeys = ModeUI.computeHoverPreview(panelIdx, d.q, d.r, { withCtrl, withShift });
+  
             updateHexStyles();
           }).on('mouseout', (event, d) => {
             if (App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r) {
@@ -809,6 +950,8 @@ export async function initSemanticMap({
                 App.flightHoverTarget.r === d.r) {
               App.flightHoverTarget = null;
             }
+            // ★ 清空预览
+            App.highlightedHexKeys.clear();
             updateHexStyles();
           }).on('click', (event, d) => {
             event.preventDefault();
@@ -1129,8 +1272,9 @@ export async function initSemanticMap({
         const isHovered     = App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r;
         const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
         const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
+        const isPreview     = App.highlightedHexKeys.has(key);  // ★ NEW
 
-        if (isHovered || isFlightStart || isFlightHover || isSelected) {
+        if (isSelected || isPreview || isHovered || isFlightStart || isFlightHover) {
           opacity = STYLE.OPACITY_HOVER;
         } else {
           // 其余情况都按默认；被排除只是在“非交互态”时保持默认不亮
@@ -1798,7 +1942,8 @@ export async function initSemanticMap({
       publishToStepAnalysis();
 
       // UI 复位
-      ModeUI.computeAndApply({});
+      // ModeUI.computeAndApply({});
+      ModeUI.forceGroupDefault();
     }
   };
   const onBlankDblClick = (e) => {
