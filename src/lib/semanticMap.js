@@ -16,6 +16,8 @@ const STYLE = {
   OPACITY_HOVER: 0.8,
   OPACITY_SELECTED: 1.0,
   OPACITY_NEIGHBOR: 0.6,
+  OPACITY_PREVIEW: 0.6,      // 预览（待选）态透明度
+  HATCH_ID: 'preview-hatch', // 预览斜线填充的 <pattern> id
 
   CITY_RADIUS: 3.5,
   CITY_BORDER_WIDTH: 1.2,
@@ -53,12 +55,24 @@ const STYLE = {
   SUBSPACE_GAP: 20,
   SUBSPACE_DEFAULT_LEFT: 30,
   SUBSPACE_DEFAULT_TOP: 30,
+  
+   // --- preview 透明度 ---
+  OPACITY_PREVIEW_CENTER: 0.85,   // 鼠标所在 hex（中心）
+  OPACITY_PREVIEW_NEIGHBOR: 0.7,  // 与中心点“有关系”的预览邻居
+
+  // --- 斜线阴影样式 ---
+  HATCH_SPACING: 5,               // 斜线间距（px）
+  HATCH_STROKE: '#000',           // 斜线颜色（可依据主题调）
+  HATCH_STROKE_WIDTH: 0.8,          // 斜线粗细
+  HATCH_OPACITY: 0.6,            // 斜线透明度
+  HATCH_ANGLE: 45,                // 斜线角度（度）
+
 };
 
 // src/lib/semanticMap.js（在 STYLE 下方添加）
 const LAYOUT = {
   TARGET_COLS: 3,          // 目标列数（默认 3）
-  MAX_COLS: 4,             // 大屏最多 4 列（可按需改）
+  MAX_COLS: 5,             // 大屏最多 4 列（可按需改）
   MIN_COLS: 1,
   GAP: 20,                 // 卡片间距，沿用你已有的 SUBSPACE_GAP 也可
   PAD_H: 12,               // playground 水平内边距
@@ -193,6 +207,25 @@ export async function initSemanticMap({
       .concat([[radius, 0]]);
   };
 
+  // 在指定 svg 里确保存在一个用于“预览态”的斜线填充 pattern
+  function ensureHatchPattern(svgSel) {
+    if (!svgSel || svgSel.empty && svgSel.empty()) return;
+    const defs = svgSel.select('defs').empty() ? svgSel.append('defs') : svgSel.select('defs');
+    if (defs.select(`#${STYLE.HATCH_ID}`).empty()) {
+      const pat = defs.append('pattern')
+        .attr('id', STYLE.HATCH_ID)
+        .attr('patternUnits', 'userSpaceOnUse')
+        .attr('width', 6).attr('height', 6)
+        .attr('patternTransform', 'rotate(45)');
+      pat.append('line')
+        .attr('x1', 0).attr('y1', 0)
+        .attr('x2', 0).attr('y2', 6)
+        .attr('stroke', '#444')        // 阴影线的颜色（可按需调整）
+        .attr('stroke-width', 1)
+        .attr('stroke-opacity', 0.6);  // 线条稍微淡一些
+    }
+  }
+
   const safeNum = (v, fallback = 0) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
@@ -245,50 +278,67 @@ export async function initSemanticMap({
     return [tx + offsetX, ty + offsetY];
   }
 
-  // === 坐标/变换工具：把 axial(0,0) 精准放到容器中心 =================
-function axialToXY(q, r, radius = App.config.hex.radius) {
-  // 平顶六边形（flat-top）轴坐标 → 像素
-  // x = 1.5R * q,  y = sqrt(3)R * (r + q/2)
-  return [1.5 * radius * q, Math.sqrt(3) * radius * (r + q / 2)];
-}
+    // 为每个 panel 的 <svg> 确保一个斜线填充 pattern
+    function ensureHatchDefs(svgSel, panelIdx) {
+      let defs = svgSel.select('defs');
+      if (defs.empty()) defs = svgSel.append('defs');
 
-function buildOriginTransform(width, height, k = 1) {
-  const [ox, oy] = axialToXY(0, 0, App.config.hex.radius); // 多数数据里 (0,0) → (0,0)
-  // 复合顺序非常重要：先把画布中心移到可视中心 → 再缩放 → 再把世界原点移到 0,0
-  // 这样能保证：X' = (X - ox) * k + width/2
-  return d3.zoomIdentity
-    .translate(width / 2, height / 2)
-    .scale(k)
-    .translate(-ox, -oy);
-}
+      const pid = `hex-hatch-${panelIdx}`;
+      let pat = defs.select(`#${pid}`);
+      if (pat.empty()) {
+        pat = defs.append('pattern')
+          .attr('id', pid)
+          .attr('patternUnits', 'userSpaceOnUse')
+          .attr('width', STYLE.HATCH_SPACING)
+          .attr('height', STYLE.HATCH_SPACING)
+          .attr('patternTransform', `rotate(${STYLE.HATCH_ANGLE})`);
 
-// 从当前已选节点集合（persistentHexKeys）推导出涉及到的整条线路，灌入 selectedRouteIds
-function seedSelectedRoutesFromPersistent() {
-  if (!App.persistentHexKeys || App.persistentHexKeys.size === 0) return false;
-  if (App.selectedRouteIds && App.selectedRouteIds.size > 0) return false;
-
-  let added = false;
-  (App._lastLinks || []).forEach(link => {
-    if (!isSelectableRoute(link)) return;
-    const path = Array.isArray(link.path) ? link.path : [];
-    for (let i = 0; i < path.length; i++) {
-      const p = path[i];
-      const pIdx = resolvePanelIdxForPathPoint(p, link, i);
-      const key = `${pIdx}|${p.q},${p.r}`;
-      if (App.persistentHexKeys.has(key)) {
-        App.selectedRouteIds.add(linkKey(link));
-        added = true;
-        break;
+        // 只画线，不画背景；“空白”区域透明 → 下方的底色可见
+        pat.append('line')
+          .attr('x1', 0).attr('y1', 0)
+          .attr('x2', 0).attr('y2', STYLE.HATCH_SPACING)
+          .attr('stroke', STYLE.HATCH_STROKE)
+          .attr('stroke-width', STYLE.HATCH_STROKE_WIDTH)
+          .attr('opacity', STYLE.HATCH_OPACITY);
       }
+      return `url(#${pid})`;
     }
-  });
 
-  if (added) {
-    // 用路线+排除点重算一次持久选集，保证后续操作都在“路线视角”上进行
-    recomputePersistentFromRoutes();
+
+  // === 坐标/变换工具：把 axial(0,0) 精准放到容器中心 =================
+  function axialToXY(q, r, radius = App.config.hex.radius) {
+    // 平顶六边形（flat-top）轴坐标 → 像素
+    // x = 1.5R * q,  y = sqrt(3)R * (r + q/2)
+    return [1.5 * radius * q, Math.sqrt(3) * radius * (r + q / 2)];
   }
-  return added;
-}
+
+  // 从当前已选节点集合（persistentHexKeys）推导出涉及到的整条线路，灌入 selectedRouteIds
+  function seedSelectedRoutesFromPersistent() {
+    if (!App.persistentHexKeys || App.persistentHexKeys.size === 0) return false;
+    if (App.selectedRouteIds && App.selectedRouteIds.size > 0) return false;
+
+    let added = false;
+    (App._lastLinks || []).forEach(link => {
+      if (!isSelectableRoute(link)) return;
+      const path = Array.isArray(link.path) ? link.path : [];
+      for (let i = 0; i < path.length; i++) {
+        const p = path[i];
+        const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+        const key = `${pIdx}|${p.q},${p.r}`;
+        if (App.persistentHexKeys.has(key)) {
+          App.selectedRouteIds.add(linkKey(link));
+          added = true;
+          break;
+        }
+      }
+    });
+
+    if (added) {
+      // 用路线+排除点重算一次持久选集，保证后续操作都在“路线视角”上进行
+      recomputePersistentFromRoutes();
+    }
+    return added;
+  }
 
 
 
@@ -999,8 +1049,12 @@ function seedSelectedRoutesFromPersistent() {
     const svg = App.subspaceSvgs[panelIdx];
     const overlay = App.overlaySvgs[panelIdx];
     if (!svg || svg.empty() || !overlay || overlay.empty()) return;
+    // 确保当前面板 svg 拥有用于预览态的斜线填充
+    ensureHatchPattern(svg);
 
     const { root: overlayRoot } = ensureOverlayRoot(overlay);
+    // >>> 新增：为当前 panel 的 svg 定义斜线 pattern
+    ensureHatchDefs(svg, panelIdx);
 
     // 尺寸计算
     const parent = svg.node().parentNode; // .hex-container
@@ -1083,6 +1137,13 @@ function seedSelectedRoutesFromPersistent() {
             .attr('stroke', App.config.hex.borderColor)
             .attr('stroke-width', App.config.hex.borderWidth)
             .attr('fill-opacity', App.config.hex.fillOpacity);
+
+          // >>> 新增：顶层“斜线阴影”覆盖，默认不显示（fill:none）
+          g.append('path')
+            .attr('class', 'hex-hatch')
+            .attr('d', d3.line()(hexPoints(hexRadius)))
+            .attr('fill', 'none')                 // 需要时再切到 pattern
+            .style('pointer-events', 'none');     // 阴影不截获事件
 
           g.on('mouseover', (event, d) => {
             App.hoveredHex = { panelIdx, q: d.q, r: d.r };
@@ -1416,25 +1477,55 @@ function seedSelectedRoutesFromPersistent() {
     // 不再做邻居扩散：仅根据 persistent / excluded / hover / flight 来设透明度
     App.subspaceSvgs.forEach((svg, panelIdx) => {
       svg.selectAll('g.hex').each(function(d) {
-        const path = d3.select(this).select('path');
+        const gSel = d3.select(this);
+        const path = gSel.select('path');               // 底色 path（已有）
+        const hatch = gSel.select('path.hex-hatch');    // 斜线 path（新加）
         let opacity = STYLE.OPACITY_DEFAULT;
+        let useHatch = false; // 预览态使用斜线填充
+        const baseFill = getHexFillColor(d);
 
         const key = pkey(panelIdx, d.q, d.r);
-        const isExcluded    = App.excludedHexKeys.has(key);
         const isSelected    = App.persistentHexKeys.has(key);
+        const isExcluded    = App.excludedHexKeys.has(key);
         const isHovered     = App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r;
         const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
         const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
-        const isPreview     = App.highlightedHexKeys.has(key);  // ★ NEW
 
-        if (isSelected || isPreview || isHovered || isFlightStart || isFlightHover) {
-          opacity = STYLE.OPACITY_HOVER;
+        // 预览集合（App.highlightedHexKeys 里既有中心也有邻居）
+        const isPreview = App.highlightedHexKeys.has(key);
+        const isPreviewCenter =
+          isPreview && (App.hoveredHex?.panelIdx === panelIdx) &&
+          (App.hoveredHex.q === d.q) && (App.hoveredHex.r === d.r);
+        const isPreviewNeighbor = isPreview && !isPreviewCenter;
+
+        // —— 透明度：优先级（选中/中心/邻居/其他）
+        if (isSelected) {
+          opacity = STYLE.OPACITY_SELECTED;                     // 已选：最亮
+        } else if (isHovered || isFlightStart || isFlightHover) {
+          opacity = STYLE.OPACITY_HOVER;                        // 鼠标/航班端点：亮
+        } else if (isPreviewCenter) {
+          opacity = STYLE.OPACITY_PREVIEW_CENTER;               // 待选中心：较亮
+        } else if (isPreviewNeighbor) {
+          opacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;             // 待选邻居：略暗
         } else {
-          // 其余情况都按默认；被排除只是在“非交互态”时保持默认不亮
-          opacity = STYLE.OPACITY_DEFAULT;
+          opacity = STYLE.OPACITY_DEFAULT;                      // 其他：默认
         }
-
         path.attr('fill-opacity', opacity);
+
+        // —— 斜线阴影：仅给“预览邻居”加阴影，其它都不画
+        const needHatch = isPreviewNeighbor;
+        hatch.attr('fill', needHatch ? `url(#hex-hatch-${panelIdx})` : 'none');
+
+ 
+        // 应用填充（预览态用斜线 pattern，其它用原有颜色）
+        if (useHatch) {
+          path.attr('fill', `url(#${STYLE.HATCH_ID})`);
+        } else {
+          path.attr('fill', baseFill);
+        }
+        path.attr('fill-opacity', opacity);
+
+
       });
     });
   }
