@@ -55,6 +55,19 @@ const STYLE = {
   SUBSPACE_DEFAULT_TOP: 30,
 };
 
+// src/lib/semanticMap.js（在 STYLE 下方添加）
+const LAYOUT = {
+  TARGET_COLS: 3,          // 目标列数（默认 3）
+  MAX_COLS: 4,             // 大屏最多 4 列（可按需改）
+  MIN_COLS: 1,
+  GAP: 20,                 // 卡片间距，沿用你已有的 SUBSPACE_GAP 也可
+  PAD_H: 12,               // playground 水平内边距
+  ASPECT: 0.72,            // 高/宽，决定子空间纵横比（可调 0.7~0.8）
+  MIN_W: STYLE.SUBSPACE_MIN_W,
+  MIN_H: STYLE.SUBSPACE_MIN_H,
+};
+
+
 /* =========================
  * 初始化入口
  * ========================= */
@@ -136,7 +149,8 @@ export async function initSemanticMap({
       route: false,          // 按钮想保持“Route Select 绿色”
       connectArmed: false,   // 按钮想保持“Connect 黄色（armed）”
     },
-
+    //程序性布局/尺寸调整时，静默 RO 标记
+    _squelchResize: false,
     // 选中与快照
     persistentHexKeys: new Set(),
     excludedHexKeys: new Set(),
@@ -231,6 +245,53 @@ export async function initSemanticMap({
     return [tx + offsetX, ty + offsetY];
   }
 
+  // === 坐标/变换工具：把 axial(0,0) 精准放到容器中心 =================
+function axialToXY(q, r, radius = App.config.hex.radius) {
+  // 平顶六边形（flat-top）轴坐标 → 像素
+  // x = 1.5R * q,  y = sqrt(3)R * (r + q/2)
+  return [1.5 * radius * q, Math.sqrt(3) * radius * (r + q / 2)];
+}
+
+function buildOriginTransform(width, height, k = 1) {
+  const [ox, oy] = axialToXY(0, 0, App.config.hex.radius); // 多数数据里 (0,0) → (0,0)
+  // 复合顺序非常重要：先把画布中心移到可视中心 → 再缩放 → 再把世界原点移到 0,0
+  // 这样能保证：X' = (X - ox) * k + width/2
+  return d3.zoomIdentity
+    .translate(width / 2, height / 2)
+    .scale(k)
+    .translate(-ox, -oy);
+}
+
+// 从当前已选节点集合（persistentHexKeys）推导出涉及到的整条线路，灌入 selectedRouteIds
+function seedSelectedRoutesFromPersistent() {
+  if (!App.persistentHexKeys || App.persistentHexKeys.size === 0) return false;
+  if (App.selectedRouteIds && App.selectedRouteIds.size > 0) return false;
+
+  let added = false;
+  (App._lastLinks || []).forEach(link => {
+    if (!isSelectableRoute(link)) return;
+    const path = Array.isArray(link.path) ? link.path : [];
+    for (let i = 0; i < path.length; i++) {
+      const p = path[i];
+      const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+      const key = `${pIdx}|${p.q},${p.r}`;
+      if (App.persistentHexKeys.has(key)) {
+        App.selectedRouteIds.add(linkKey(link));
+        added = true;
+        break;
+      }
+    }
+  });
+
+  if (added) {
+    // 用路线+排除点重算一次持久选集，保证后续操作都在“路线视角”上进行
+    recomputePersistentFromRoutes();
+  }
+  return added;
+}
+
+
+
   // flight 端点可见性（用于“端点不可见则不画”）
   const isPointVisible = (panelIdx, q, r) => {
     const pt = getHexGlobalXY(panelIdx, q, r);
@@ -272,6 +333,7 @@ export async function initSemanticMap({
     }
     return -1;
   }
+
   // 插入一个点到 link.path 的 anchorIndex 之后
   function insertPointAfter(link, anchorIndex, panelIdx, q, r){
     if (!link || !Array.isArray(link.path)) return;
@@ -285,6 +347,94 @@ export async function initSemanticMap({
     // anchor 往后移动一个，方便继续“顺序加点”
     App.insertMode.anchorIndex = insertAt; 
   }
+
+  function computeColsAndItemSize(containerW) {
+    const pad = (LAYOUT.PAD_H || 0) * 2;
+    const usable = Math.max(0, containerW - pad);
+    // 基于最小宽度+间距估算最大可放列数
+    const maxByWidth = Math.max(
+      LAYOUT.MIN_COLS,
+      Math.min(
+        LAYOUT.MAX_COLS,
+        Math.floor((usable + LAYOUT.GAP) / (LAYOUT.MIN_W + LAYOUT.GAP))
+      )
+    );
+    const cols = Math.min(LAYOUT.TARGET_COLS, Math.max(LAYOUT.MIN_COLS, maxByWidth));
+    // 计算卡片宽度（夹在 MIN_W 与平均可用宽度之间）
+    const itemW = Math.max(
+      LAYOUT.MIN_W,
+      Math.floor((usable - (cols - 1) * LAYOUT.GAP) / cols)
+    );
+    const itemH = Math.max(LAYOUT.MIN_H, Math.floor(itemW * LAYOUT.ASPECT));
+    const totalW = cols * itemW + (cols - 1) * LAYOUT.GAP;
+    const leftPad = Math.max(LAYOUT.PAD_H, Math.floor((containerW - totalW) / 2)); // 居中
+    return { cols, itemW, itemH, leftPad };
+  }
+
+  function applyResponsiveLayout(force = false) {
+    if (!App.playgroundEl) return;
+
+    // 找到滚动容器并保存滚动位置
+    const scroller = App.playgroundEl.closest('.mv-scroller') || App.playgroundEl.parentElement;
+    const prevTop  = scroller ? scroller.scrollTop  : 0;
+    const prevLeft = scroller ? scroller.scrollLeft : 0;
+
+    const containerW = App.playgroundEl.clientWidth || 0;
+    if (!containerW) return;
+
+    const { cols, itemW, itemH, leftPad } = computeColsAndItemSize(containerW);
+    const subspaces = Array.from(App.playgroundEl.querySelectorAll('.subspace'));
+
+    // 程序性布局：屏蔽 RO 的“用户调整”标记
+    App._squelchResize = true;
+
+    subspaces.forEach((div, i) => {
+      const st = App.panelStates[i] || {};
+      const moved   = !!st.userMoved;
+      const resized = !!st.userResized;
+
+      // 非 force 模式，尊重用户拖拽/手动改尺寸过的卡片
+      if (!force && (moved || resized)) return;
+
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const left = leftPad + col * (itemW + LAYOUT.GAP);
+      const top  = STYLE.SUBSPACE_DEFAULT_TOP + row * (itemH + LAYOUT.GAP);
+
+      Object.assign(div.style, {
+        left: `${left}px`,
+        top:  `${top}px`,
+        width: `${itemW}px`,
+        height:`${itemH}px`,
+      });
+
+      // 同步状态；force 时顺便清掉用户标记（使后续响应式还能继续生效）
+      App.panelStates[i] = {
+        ...(st || {}),
+        left, top, width: itemW, height: itemH,
+        ...(force ? { userMoved: false, userResized: false } : {})
+      };
+
+      syncContainerHeight(div);
+    });
+
+    // 估算整体高度，更新全局 overlay 尺寸
+    const rows = Math.ceil(subspaces.length / cols);
+    const approxHeight = STYLE.SUBSPACE_DEFAULT_TOP + rows * (itemH + LAYOUT.GAP) + 40;
+    App.globalOverlayEl.setAttribute('width', App.playgroundEl.clientWidth);
+    App.globalOverlayEl.setAttribute('height', Math.max(approxHeight, App.playgroundEl.clientHeight));
+
+    // 重画连线与透明度
+    drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+    updateHexStyles();
+
+    // 释放静默标记并还原滚动位置
+    requestAnimationFrame(() => {
+      App._squelchResize = false;
+      if (scroller) scroller.scrollTo({ top: prevTop, left: prevLeft, behavior: 'auto' });
+    });
+  }
+
 
   // —— Mode UI：按钮状态（绿色=active，黄色=armed），无 HUD/Chip —— //
   const ModeUI = (() => {
@@ -391,6 +541,8 @@ export async function initSemanticMap({
 
       // —— Route 模式 —— //
       if (routeMode) {
+        // 若是从 Group 模式切过来且还没选线路，把现有选中的节点映射成整条线路
+        seedSelectedRoutesFromPersistent();
         let added = false;
         (App._lastLinks || []).forEach(link => {
           if (!isSelectableRoute(link)) return;
@@ -512,6 +664,7 @@ export async function initSemanticMap({
           // 点 Route：关掉 Connect 黄灯，点亮 Route 绿灯
           App.uiPref.connectArmed = false;
           App.uiPref.route = true;
+          seedSelectedRoutesFromPersistent();
           computeAndApply();
         });
       }
@@ -1823,7 +1976,7 @@ export async function initSemanticMap({
       const idx = Number(subspaceDiv.dataset.index ?? idxInitial);
       const left = parseFloat(subspaceDiv.style.left || '0');
       const top  = parseFloat(subspaceDiv.style.top  || '0');
-      App.panelStates[idx] = { ...(App.panelStates[idx] || {}), left, top };
+      App.panelStates[idx] = { ...(App.panelStates[idx] || {}), left, top, userMoved: true };
     };
 
     title.addEventListener('mousedown', (e) => {
@@ -1855,26 +2008,34 @@ export async function initSemanticMap({
     });
   }
 
-  function observePanelResize() {
-    App.playgroundEl.querySelectorAll('.subspace').forEach((subspaceDiv) => {
-      if (subspaceDiv._resizeObserver) return;
-      const ro = new ResizeObserver(() => {
-        const idx = Number(subspaceDiv.dataset.index ?? -1);
-        const cs = getComputedStyle(subspaceDiv);
-        const w = parseFloat(cs.width);
-        const h = parseFloat(cs.height);
-        if (idx >= 0) {
-          App.panelStates[idx] = { ...(App.panelStates[idx] || {}), width: w, height: h };
-        }
-        syncContainerHeight(subspaceDiv);
-        drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
-        updateHexStyles();
-      });
-      subspaceDiv._resizeObserver = ro;
-      ro.observe(subspaceDiv);
-      cleanupFns.push(() => ro.disconnect());
+function observePanelResize() {
+  App.playgroundEl.querySelectorAll('.subspace').forEach((subspaceDiv) => {
+    if (subspaceDiv._resizeObserver) return;
+    const ro = new ResizeObserver(() => {
+      const idx = Number(subspaceDiv.dataset.index ?? -1);
+      const cs = getComputedStyle(subspaceDiv);
+      const w = parseFloat(cs.width);
+      const h = parseFloat(cs.height);
+      if (idx >= 0) {
+        const base = App.panelStates[idx] || {};
+        // ★ 程序性布局期间只同步宽高，不打“用户”标记
+        App.panelStates[idx] = {
+          ...base,
+          width: w,
+          height: h,
+          ...(App._squelchResize ? {} : { userResized: true })
+        };
+      }
+      syncContainerHeight(subspaceDiv);
+      drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+      updateHexStyles();
     });
-  }
+    subspaceDiv._resizeObserver = ro;
+    ro.observe(subspaceDiv);
+    cleanupFns.push(() => ro.disconnect());
+  });
+}
+
 
   // 确保全局 overlay 有根节点
   ensureOverlayRoot(d3.select(App.globalOverlayEl));
@@ -1898,12 +2059,17 @@ export async function initSemanticMap({
     updateHexStyles();
     publishToStepAnalysis();
     ModeUI.computeAndApply({});
+
+    // 初次渲染后
+    applyResponsiveLayout(true);
+
     const resizeHandler = () => {
       (data.subspaces || []).forEach((space, i) => renderHexGridFromData(i, space, App.config.hex.radius));
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
       updateHexStyles();
       App.globalOverlayEl.setAttribute('width', App.playgroundEl.clientWidth);
       App.globalOverlayEl.setAttribute('height', App.playgroundEl.clientHeight);
+      applyResponsiveLayout(false);   // ← 新增：窗口变化时重新排布
     };
     window.addEventListener('resize', resizeHandler);
     cleanupFns.push(() => window.removeEventListener('resize', resizeHandler));
@@ -1911,6 +2077,7 @@ export async function initSemanticMap({
     const ro = new ResizeObserver(() => {
       App.globalOverlayEl.setAttribute('width', App.playgroundEl.clientWidth);
       App.globalOverlayEl.setAttribute('height', App.playgroundEl.clientHeight);
+      applyResponsiveLayout(false);   // ← 新增
     });
     ro.observe(App.playgroundEl);
     cleanupFns.push(() => ro.disconnect());
@@ -2043,37 +2210,48 @@ export async function initSemanticMap({
     return out;
   }
 
-  function _deleteSubspaceByIndex(idx) {
-    if (!App.currentData || !Array.isArray(App.currentData.subspaces)) return;
-    if (idx < 0 || idx >= App.currentData.subspaces.length) return;
+function _deleteSubspaceByIndex(idx) {
+  if (!App.currentData || !Array.isArray(App.currentData.subspaces)) return;
+  if (idx < 0 || idx >= App.currentData.subspaces.length) return;
 
-    // 1) 数据删除
-    App.currentData.subspaces.splice(idx, 1);
+  // ★ 保存滚动位置
+  const scroller = App.playgroundEl.closest('.mv-scroller') || App.playgroundEl.parentElement;
+  const prevTop  = scroller ? scroller.scrollTop  : 0;
+  const prevLeft = scroller ? scroller.scrollLeft : 0;
 
-    // 1.1) 同步删掉持久化状态与缩放状态
-    App.panelStates.splice(idx, 1);
-    App.zoomStates.splice(idx, 1);
+  // 1) 删除数据与状态
+  App.currentData.subspaces.splice(idx, 1);
+  App.panelStates.splice(idx, 1);
+  App.zoomStates.splice(idx, 1);
 
-    // 2) 链路重建
-    App._lastLinks = _rebuildLinksAfterRemove(App._lastLinks, idx);
+  // 2) 重建连线
+  App._lastLinks = _rebuildLinksAfterRemove(App._lastLinks, idx);
 
-    // 清理持久集合中属于被删面板的 key
-    for (const k of Array.from(App.persistentHexKeys)) {
-      const [panelStr] = k.split('|');
-      if (+panelStr === idx) App.persistentHexKeys.delete(k);
-    }
-
-    // 3) 全量重绘
-    renderPanels(App.currentData.subspaces || []);
-    (App.currentData.subspaces || []).forEach((space, i) => {
-      renderHexGridFromData(i, space, App.config.hex.radius);
-    });
-    drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
-    updateHexStyles();
-    observePanelResize();
-
-    publishToStepAnalysis();
+  // 清理选集
+  for (const k of Array.from(App.persistentHexKeys)) {
+    const [panelStr] = k.split('|');
+    if (+panelStr === idx) App.persistentHexKeys.delete(k);
   }
+
+  // 3) 全量重绘
+  renderPanels(App.currentData.subspaces || []);
+  (App.currentData.subspaces || []).forEach((space, i) => {
+    renderHexGridFromData(i, space, App.config.hex.radius);
+  });
+  drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+  updateHexStyles();
+  observePanelResize();
+
+  publishToStepAnalysis();
+
+  // ★ 强制响应式重排（忽略 userMoved/userResized）
+  applyResponsiveLayout(true);
+
+  // ★ 恢复滚动位置（下一帧，待高度稳定后）
+  requestAnimationFrame(() => {
+    if (scroller) scroller.scrollTo({ top: prevTop, left: prevLeft, behavior: 'auto' });
+  });
+}
 
   /* =========================
    * 对外 API
@@ -2103,6 +2281,8 @@ export async function initSemanticMap({
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
       updateHexStyles();
       observePanelResize();
+      applyResponsiveLayout(true);     // ← 新增：加了卡片要重排
+
     },
     setOnSubspaceRename(fn) {
       App.onSubspaceRename = typeof fn === 'function' ? fn : null;
