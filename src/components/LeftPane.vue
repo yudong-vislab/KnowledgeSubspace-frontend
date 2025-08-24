@@ -3,11 +3,15 @@
 import { ref, watch, nextTick, onMounted } from 'vue'
 import ChatDock from './ChatDock.vue'
 import * as d3 from 'd3';
+import { sendQueryToLLM } from '../lib/api'   // ★★ 新增：调用后端 /api/query
 
 const selectedLLM = ref('ChatGPT')
 const llmOptions = ['ChatGPT', 'QWen']
 
-const messages = ref([{ role: 'system', text: 'First...' }])
+// 建议 messages 里统一使用 {role, text}，发给后端时做映射
+const messages = ref([
+  { role: 'system', text: 'You are chatting with an academic assistant.' }
+])
 
 const msgBoxRef = ref(null)
 const atBottom = ref(true)
@@ -29,10 +33,17 @@ watch(() => messages.value.length, async () => {
   if (atBottom.value) scrollToBottom('smooth')
 })
 
-function handleSend(msg) {
+async function handleSend(msg) {
   messages.value.push({ role: 'user', text: msg })
-  setTimeout(() => messages.value.push({ role: 'assistant', text: 'Received...' }), 300)
+  try {
+    const answer = await sendQueryToLLM(msg, selectedLLM.value)
+    messages.value.push({ role: 'assistant', text: answer })
+  } catch (err) {
+    messages.value.push({ role: 'assistant', text: `调用失败：${err.message}` })
+  }
 }
+
+
 function handleUploadFiles(files) { /* … */ }
 
 // **************************************************************

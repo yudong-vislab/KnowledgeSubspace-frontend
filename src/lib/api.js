@@ -32,3 +32,15 @@ export async function renameMapTitle(newTitle){
     body: JSON.stringify({ title: newTitle })
   })
 }
+
+export async function sendQueryToLLM(query, llm = 'ChatGPT') {
+  const res = await fetch('/api/query', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({ query, model: llm === 'QWen' ? 'qwen-turbo' : 'gpt-3.5-turbo' })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data.answer;
+}
+
