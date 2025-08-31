@@ -1,6 +1,6 @@
 <template>
   <section class="rp-card one">
-    <header class="card__title">In-process Analysis View</header>
+    <header class="card__title">Incremental Analysis View</header>
 
     <div class="rp-card__body">
       <div class="steps-stack" ref="stackRef">
