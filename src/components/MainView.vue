@@ -67,7 +67,7 @@ function onSave() {
 <template>
   <div class="mainview">
     <header class="mv-header">
-      <h2 class="mv-title editable-title" ref="mainTitleRef">Semantic Map View</h2>
+      <h2 class="mv-title editable-title" ref="mainTitleRef">Semantic Subspace Map View</h2>
 
       <!-- 👇 模式按钮条（新增） -->
       <div class="mode-toolbar">
