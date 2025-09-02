@@ -169,8 +169,11 @@ export async function initSemanticMap({
     persistentHexKeys: new Set(),
     excludedHexKeys: new Set(),
     selectedRouteIds: new Set(),   // ★ 新增：当前被选中的“整条线路”的 id 集合（统计 road/river/flight）
-    modKeys: { ctrl: false, meta: false, shift: false },
+    modKeys: { ctrl: false, meta: false, shift: false, alt: false },
     _lastSnapshot: null,
+
+    // 每个 panel 的 { country_id -> Set<"panel|q,r"> }
+    countryKeysByPanel: [],
 
     // 回调 & 容器
     onSubspaceRename: null,
@@ -206,6 +209,13 @@ export async function initSemanticMap({
     return d3.range(6).map(i => [radius * Math.cos(angle * i), radius * Math.sin(angle * i)])
       .concat([[radius, 0]]);
   };
+
+  function getCountryKeys(panelIdx, countryId) {
+    const m = App.countryKeysByPanel?.[panelIdx];
+    if (!m) return new Set();
+    return new Set(m.get(countryId) || []);
+  }
+
 
   // 在指定 svg 里确保存在一个用于“预览态”的斜线填充 pattern
   function ensureHatchPattern(svgSel) {
@@ -485,6 +495,17 @@ export async function initSemanticMap({
     });
   }
 
+  function computeHoverOrCountryPreview(panelIdx, q, r, { withCtrl=false, withShift=false, withAlt=false } = {}) {
+    if (withAlt) {
+      // 取鼠标所在点的国家，返回该国家所有键作为预览
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      const cid = hex?.country_id;
+      if (cid) return getCountryKeys(panelIdx, cid);
+      return new Set(); // 没国家就不给预览
+    }
+    // 否则走原有 hover 预览逻辑
+    return ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl, withShift });
+  }
 
   // —— Mode UI：按钮状态（绿色=active，黄色=armed），无 HUD/Chip —— //
   const ModeUI = (() => {
@@ -518,9 +539,34 @@ export async function initSemanticMap({
       App.insertMode = null;
       App.flightStart = null;
       App.modKeys = { ctrl:false, meta:false, shift:false };
+
+      // ★ 新增：彻底清理悬停预览与路线/排除态，避免回到 Group 后残影
+      App.selectedRouteIds.clear();
+      App.excludedHexKeys.clear();
+      App.highlightedHexKeys.clear();
+      recomputePersistentFromRoutes();   // 会把 persistent 与路线状态同步一遍（此时为空集）
+      drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
+      updateHexStyles();
+      publishToStepAnalysis();
+
+
       // 显示：Group 按钮绿；行为：单击走 Group 选择
       computeAndApply({ ctrl:false, meta:false, shift:false });
     }
+
+    // 路线的可见点（已被排除的点不参与高亮/预览）
+    function visiblePathKeys(link) {
+      const out = [];
+      const path = Array.isArray(link?.path) ? link.path : [];
+      for (let i = 0; i < path.length; i++) {
+        const p = path[i];
+        const pIdx = resolvePanelIdxForPathPoint(p, link, i);
+        const k = pkey(pIdx, p.q, p.r);
+        if (!App.excludedHexKeys.has(k)) out.push(k);
+      }
+      return out; // Array<"panelIdx|q,r">
+    }
+
 
 
     // —— 预览工具：根据当前模式，计算鼠标悬停点应该高亮的 key 集 —— //
@@ -538,10 +584,7 @@ export async function initSemanticMap({
           (App._lastLinks || []).forEach(link => {
             if (!isSelectableRoute(link)) return;
             if (linkContainsNode(link, panelIdx, q, r)) {
-              (link.path||[]).forEach((p,i) => {
-                const pIdx = resolvePanelIdxForPathPoint(p, link, i);
-                result.add(pkey(pIdx, p.q, p.r));
-              });
+              visiblePathKeys(link).forEach(k => result.add(k));
             }
           });
           return result;
@@ -549,11 +592,8 @@ export async function initSemanticMap({
 
         // 已有锚点：高亮当前 route 全路径；并依据 armed/端点给出暗示
         const link = findLinkById(App.insertMode.routeId);
-        if (link && Array.isArray(link.path)) {
-          link.path.forEach((p,i) => {
-            const pIdx = resolvePanelIdxForPathPoint(p, link, i);
-            result.add(pkey(pIdx, p.q, p.r));
-          });
+        if (link) {
+          visiblePathKeys(link).forEach(k => result.add(k));
 
           const iIn = indexOfPointInLink(link, panelIdx, q, r);
           if (iIn >= 0) {
@@ -580,10 +620,7 @@ export async function initSemanticMap({
         (App._lastLinks || []).forEach(link => {
           if (!isSelectableRoute(link)) return;
           if (linkContainsNode(link, panelIdx, q, r)) {
-            (link.path||[]).forEach((p,i) => {
-              const pIdx = resolvePanelIdxForPathPoint(p, link, i);
-              result.add(pkey(pIdx, p.q, p.r));
-            });
+            visiblePathKeys(link).forEach(k => result.add(k));
           }
         });
         return result;
@@ -597,10 +634,7 @@ export async function initSemanticMap({
         (App._lastLinks || []).forEach(link => {
           if (!isSelectableRoute(link)) return;
           if (isStartOfLink(link, panelIdx, q, r)) {
-            (link.path||[]).forEach((p,i) => {
-              const pIdx = resolvePanelIdxForPathPoint(p, link, i);
-              result.add(pkey(pIdx, p.q, p.r));
-            });
+            visiblePathKeys(link).forEach(k => result.add(k));
             added = true;
           }
         });
@@ -608,10 +642,7 @@ export async function initSemanticMap({
           (App._lastLinks || []).forEach(link => {
             if (!isSelectableRoute(link)) return;
             if (linkContainsNode(link, panelIdx, q, r)) {
-              (link.path||[]).forEach((p,i) => {
-                const pIdx = resolvePanelIdxForPathPoint(p, link, i);
-                result.add(pkey(pIdx, p.q, p.r));
-              });
+              visiblePathKeys(link).forEach(k => result.add(k));
             }
           });
         }
@@ -777,6 +808,8 @@ export async function initSemanticMap({
       // 成功提交后刷新
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
       recomputePersistentFromRoutes();
+      App.highlightedHexKeys.clear();
+      App.hoveredHex = null;
       updateHexStyles();
       publishToStepAnalysis();
     }
@@ -859,6 +892,8 @@ export async function initSemanticMap({
       if (e.key === 'Control') App.modKeys.ctrl = down;
       if (e.key === 'Meta')    App.modKeys.meta = down;
       if (e.key === 'Shift')   App.modKeys.shift = down;
+      if (e.key === 'Alt')     App.modKeys.alt  = down;
+
       ModeUI.computeAndApply();  // ← 读取 App.modKeys，自动回落
 
       // ★ 若正在悬停，重算预览
@@ -866,7 +901,8 @@ export async function initSemanticMap({
         const { panelIdx, q, r } = App.hoveredHex;
         App.highlightedHexKeys = computeHoverPreview(panelIdx, q, r, {
           withCtrl: (App.modKeys.ctrl || App.modKeys.meta),
-          withShift: App.modKeys.shift
+          withShift: App.modKeys.shift,
+          withAlt: App.modKeys.alt
         });
         updateHexStyles();
       }
@@ -886,7 +922,7 @@ export async function initSemanticMap({
     // 窗口失焦时重置（防止“卡住 Ctrl/Shift”）
     // 窗口失焦时：清干净修饰键 + 关闭 Route/Connect 偏好，并回到 Group
     const onBlur = () => {
-      App.modKeys = { ctrl:false, meta:false, shift:false };
+      App.modKeys = { ctrl:false, meta:false, shift:false, alt:false };
       App.uiPref.route = false;
       App.uiPref.connectArmed = false;
       ModeUI.forceGroupDefault();
@@ -896,7 +932,7 @@ export async function initSemanticMap({
     cleanupFns.push(() => window.removeEventListener('blur', onBlur));
  
     // 初始化：默认 Cluster 绿
-    App.modKeys = { ctrl:false, meta:false, shift:false };
+    App.modKeys = { ctrl:false, meta:false, shift:false, alt:false };
     ModeUI.computeAndApply();
   }
 
@@ -1067,6 +1103,34 @@ export async function initSemanticMap({
     svg.attr('width', width).attr('height', height);
     overlay.attr('width', width).attr('height', height);
 
+    // ★ 新增：panel 背景点击捕获（空白处点击=回到 Group 并清理选集）
+    let bg = svg.select('rect.bg-capture');
+    if (bg.empty()) {
+      bg = svg.insert('rect', ':first-child')   // 放在最底层
+        .attr('class', 'bg-capture')
+        .attr('x', 0).attr('y', 0)
+        .attr('fill', 'transparent')
+        .on('click', () => {
+          // 复用清理逻辑：清空所有预览/选集/排除，并回到 Group
+          App.selectedHex = null;
+          App.neighborKeySet.clear();
+          App.selectedRouteIds.clear();
+          App.excludedHexKeys.clear();
+          App.persistentHexKeys.clear();
+          App.highlightedHexKeys.clear();
+
+          drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+          App.hoveredHex = null;
+          updateHexStyles();
+          publishToStepAnalysis();
+
+          // 切回 Group（绿灯），并刷新模式 UI/预览
+          ModeUI.forceGroupDefault();
+        });
+    }
+    // 保持尺寸同步
+    bg.attr('width', width).attr('height', height);
+
     // 容器组
     let container = svg.select('g');
     if (container.empty()) container = svg.append('g');
@@ -1085,6 +1149,17 @@ export async function initSemanticMap({
 
     const hexList = rawHexList.map(h => ({ ...h, x: h.rawX, y: h.rawY, panelIdx }));
     App.allHexDataByPanel[panelIdx] = hexList;
+
+    // 为当前 panel 建立国家索引
+    const cmap = new Map(); // country_id -> Set(keys)
+    hexList.forEach(h => {
+      if (!h.country_id) return;
+      const k = `${panelIdx}|${h.q},${h.r}`;
+      if (!cmap.has(h.country_id)) cmap.set(h.country_id, new Set());
+      cmap.get(h.country_id).add(k);
+    });
+    App.countryKeysByPanel[panelIdx] = cmap;
+
 
     // 初始/持久化变换
     const savedZoom = App.panelStates[panelIdx]?.zoom;
@@ -1151,7 +1226,8 @@ export async function initSemanticMap({
             // ★ 根据当前键位/按钮状态计算预览
             const withCtrl  = isCtrlLike(event);
             const withShift = !!event.shiftKey;
-            App.highlightedHexKeys = ModeUI.computeHoverPreview(panelIdx, d.q, d.r, { withCtrl, withShift });
+            const withAlt   = !!event.altKey;  
+            App.highlightedHexKeys = computeHoverOrCountryPreview(panelIdx, d.q, d.r, { withCtrl, withShift, withAlt });
   
             updateHexStyles();
           }).on('mouseout', (event, d) => {
@@ -1210,49 +1286,92 @@ export async function initSemanticMap({
     const container = svg.select('g');
     container.selectAll('.country-border').remove();
 
-    (space.countries || []).forEach(country => {
-      const hexList = [];
-      container.selectAll('g.hex').each(function(d) {
-        if (country.hexes?.some(hx => hx.q === d.q && hx.r === d.r)) {
-          hexList.push({ ...d });
+    // 1) 建立该 panel 上的“归属表”：每个(q,r) -> 被哪些国家认领
+    const claimMap = new Map(); // key: "q,r" -> Set(country_id)
+    (space.countries || []).forEach(cn => {
+      const cid = cn.country_id;
+      (cn.hexes || []).forEach(h => {
+        const k = `${h.q},${h.r}`;
+        if (!claimMap.has(k)) claimMap.set(k, new Set());
+        claimMap.get(k).add(cid);
+      });
+    });
+
+    // 2) 工具：从 hex 中取其像素中心；六边形6个顶点（flat-top）
+    const hexDict = new Map();
+    container.selectAll('g.hex').each(function(d){
+      hexDict.set(`${d.q},${d.r}`, { x: d.x, y: d.y, panelIdx: d.panelIdx });
+    });
+    const dirs = [[+1,0],[0,+1],[-1,+1],[-1,0],[0,-1],[+1,-1]];
+    const hexCorner = (i) => {
+      const ang = Math.PI/3 * i;
+      return [hexRadius*Math.cos(ang), hexRadius*Math.sin(ang)];
+    };
+
+    // 3) 扫描所有“存在于 claimMap 的格子”，收集边（带是否冲突）
+    //    边用“端点坐标对”落地，用无向 key 去重
+    const edgeMap = new Map(); // key -> { a:[x,y], b:[x,y], dashed:boolean }
+    const edgeKey = (ax,ay,bx,by) => {
+      // 无向边：端点排序后作为 key
+      const k1 = `${ax},${ay}`, k2 = `${bx},${by}`;
+      return (k1 < k2) ? `${k1}_${k2}` : `${k2}_${k1}`;
+    };
+
+    // 给定一个(q,r)与边序号i，生成该边的两端点（像素坐标）
+    function edgeEndpoints(cx, cy, i) {
+      const p1 = hexCorner(i);
+      const p2 = hexCorner((i+1)%6);
+      return [[cx+p1[0], cy+p1[1]], [cx+p2[0], cy+p2[1]]];
+    }
+
+    // 遍历：每个被认领的格子
+    claimMap.forEach((currSet, qr) => {
+      const [qStr, rStr] = qr.split(',');
+      const q = +qStr, r = +rStr;
+      const hex = hexDict.get(qr);
+      if (!hex) return; // 没有渲染到画布上的格子就跳过
+
+      for (let i=0;i<6;i++) {
+        // 邻居坐标（轴坐标）
+        const [dq, dr] = dirs[i];
+        const nq = q + dq, nr = r + dr;
+        const nKey = `${nq},${nr}`;
+        const nbSet = claimMap.get(nKey) || new Set(); // 邻居可能为空集（无人认领）
+
+        // —— 判定是否是“边界”：
+        // 集合完全相同 => 内部边，跳过
+        const same =
+          currSet.size === nbSet.size &&
+          [...currSet].every(c => nbSet.has(c));
+        if (same) continue;
+
+        // 到这里说明两边归属不同（或一侧为空）=> 需要画边界
+        // 冲突判定：任一侧为“多国认领”
+        const dashed = (currSet.size > 1) || (nbSet.size > 1);
+
+        const [a,b] = edgeEndpoints(hex.x, hex.y, i);
+        const k = edgeKey(a[0],a[1], b[0],b[1]);
+
+        // 无向边去重：若已有，继承“冲突优先”（有一次冲突就虚线）
+        const prev = edgeMap.get(k);
+        if (prev) {
+          prev.dashed = prev.dashed || dashed;
+        } else {
+          edgeMap.set(k, { a, b, dashed });
         }
-      });
-      if (!hexList.length) return;
+      }
+    });
 
-      const keySet = new Set(hexList.map(h => `${h.panelIdx}_${h.q}_${h.r}`));
-      const dirs = [[+1,0],[0,+1],[-1,+1],[-1,0],[0,-1],[+1,-1]];
-      const hexPoint = i => {
-        const angle = Math.PI/3 * i;
-        return [hexRadius * Math.cos(angle), hexRadius * Math.sin(angle)];
-      };
-      let borderEdges = [];
-      hexList.forEach(h => {
-        const cx = h.x, cy = h.y;
-        dirs.forEach(([dq, dr], i) => {
-          const nKey = `${h.panelIdx}_${h.q+dq}_${h.r+dr}`;
-          if (!keySet.has(nKey)) {
-            const p1 = hexPoint(i);
-            const p2 = hexPoint((i+1)%6);
-            borderEdges.push([[cx+p1[0], cy+p1[1]], [cx+p2[0], cy+p2[1]]]);
-          }
-        });
-      });
-      const uniq = {};
-      const edgeKey = (a, b) => `${a[0]},${a[1]}_${b[0]},${b[1]}`;
-      borderEdges.forEach(([a,b]) => {
-        const k1 = edgeKey(a,b), k2 = edgeKey(b,a);
-        if (!uniq[k1] && !uniq[k2]) uniq[k1]=[a,b];
-      });
-
-      Object.values(uniq).forEach(([a,b]) => {
-        container.append('line')
-          .attr('class', 'country-border')
-          .attr('x1', a[0]).attr('y1', a[1])
-          .attr('x2', b[0]).attr('y2', b[1])
-          .attr('stroke', App.config.countryBorder.color)
-          .attr('stroke-width', App.config.countryBorder.width)
-          .attr('pointer-events', 'none');
-      });
+    // 4) 一次性绘制所有边
+    edgeMap.forEach(({a,b,dashed}) => {
+      container.append('line')
+        .attr('class', 'country-border')
+        .attr('x1', a[0]).attr('y1', a[1])
+        .attr('x2', b[0]).attr('y2', b[1])
+        .attr('stroke', App.config.countryBorder.color)
+        .attr('stroke-width', App.config.countryBorder.width)
+        .attr('stroke-dasharray', dashed ? '6,4' : null) // ★ 冲突边画虚线
+        .attr('pointer-events', 'none');
     });
   }
 
@@ -1473,6 +1592,7 @@ export async function initSemanticMap({
     }
   }
 
+
   function updateHexStyles() {
     // 不再做邻居扩散：仅根据 persistent / excluded / hover / flight 来设透明度
     App.subspaceSvgs.forEach((svg, panelIdx) => {
@@ -1575,6 +1695,10 @@ export async function initSemanticMap({
         const a = pts[i], b = pts[i+1];
         const ka = key(a.panelIdx, a.q, a.r);
         const kb = key(b.panelIdx, b.q, b.r);
+
+        // ★ 关键：如果任一端被排除了，就不要把这条边放进连通图
+        if (App.excludedHexKeys.has(ka) || App.excludedHexKeys.has(kb)) continue;
+
         ensure(ka).add(kb);
         ensure(kb).add(ka);
       }
@@ -1890,6 +2014,8 @@ export async function initSemanticMap({
           insertPointAfter(link, App.insertMode.anchorIndex, panelIdx, q, r);
           drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
           recomputePersistentFromRoutes();
+          App.highlightedHexKeys.clear();
+          App.hoveredHex = null;
           updateHexStyles();
           publishToStepAnalysis();
           return;
@@ -1962,6 +2088,8 @@ export async function initSemanticMap({
       recomputePersistentFromRoutes();
       App.selectedHex = { panelIdx, q, r };
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+      App.highlightedHexKeys.clear();
+      App.hoveredHex = null;
       updateHexStyles();
       publishToStepAnalysis();
       return;
@@ -1977,7 +2105,8 @@ export async function initSemanticMap({
       selectComponent(panelIdx, q, r);
       App.selectedHex = { panelIdx, q, r };
     }
-
+    App.highlightedHexKeys.clear();
+    App.hoveredHex = null;
     updateHexStyles();
     publishToStepAnalysis();
   }
@@ -2194,8 +2323,11 @@ function observePanelResize() {
       App.selectedRouteIds.clear();   // ★ 新增
       App.excludedHexKeys.clear();    // ★ 新增
       App.persistentHexKeys.clear();  // ★ 新增
+      App.highlightedHexKeys.clear(); // ★ 新增：把悬停预览也清掉
       // ★ 清空后也要重画，恢复默认线路形态
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+      App.highlightedHexKeys.clear();
+      App.hoveredHex = null;
       updateHexStyles();
       publishToStepAnalysis();
 
@@ -2209,6 +2341,8 @@ function observePanelResize() {
       App.flightStart = null;
       App.flightHoverTarget = null;
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
+      App.highlightedHexKeys.clear();
+      App.hoveredHex = null;  
       updateHexStyles();
       publishToStepAnalysis();
     }
@@ -2330,6 +2464,8 @@ function _deleteSubspaceByIndex(idx) {
     renderHexGridFromData(i, space, App.config.hex.radius);
   });
   drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+  App.highlightedHexKeys.clear();
+  App.hoveredHex = null;
   updateHexStyles();
   observePanelResize();
 
