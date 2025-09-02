@@ -182,7 +182,9 @@ export async function initSemanticMap({
     globalOverlayEl,
 
     // 数据
-    currentData: null
+    currentData: null,
+    countryKeysGlobal: new Map(),   // ★ 新增：全局 { country_id -> Set("panel|q,r") }
+
   };
 
   const cleanupFns = [];
@@ -210,10 +212,48 @@ export async function initSemanticMap({
       .concat([[radius, 0]]);
   };
 
-  function getCountryKeys(panelIdx, countryId) {
+  function getCountryKeysGlobal(countryId) {
+    const s = App.countryKeysGlobal?.get(countryId);
+    return new Set(s || []);
+  }
+
+
+  // 聚合所有面板中同一国家的 hex 键
+  function getCountryKeysAcrossPanels(countryId) {
+    const out = new Set();
+    (App.countryKeysByPanel || []).forEach(cmap => {
+      if (!cmap) return;
+      const s = cmap.get(countryId);
+      if (s && s.size) s.forEach(k => out.add(k));
+    });
+    return out;
+  }
+
+  // ★ 可选：国家 ID 归一化（当不同面板用不同 id 表示同一国家时）
+  // 用 controller.setCountryIdAlias(...) 可注入 { "p0_c1":"CN", "p1_c01":"CN" } 这样的映射
+  App.countryIdAlias = new Map();
+  function normalizeCountryId(cid) {
+    return App.countryIdAlias.get(cid) || cid;
+  }
+
+  // 仅取单面板（原有逻辑保留，如需）
+  function getCountryKeysInPanel(panelIdx, countryIdRaw) {
     const m = App.countryKeysByPanel?.[panelIdx];
     if (!m) return new Set();
-    return new Set(m.get(countryId) || []);
+    const cid = normalizeCountryId(countryIdRaw);
+    return new Set(m.get(cid) || []);
+  }
+
+  // ★ 新增：跨所有面板，取同一国家（规范 id 后）的全部 hex key
+  function getCountryKeysAllPanels(countryIdRaw) {
+    const out = new Set();
+    const cid = normalizeCountryId(countryIdRaw);
+    (App.countryKeysByPanel || []).forEach((m) => {
+      if (!m) return;
+      const s = m.get(cid);
+      if (s && s.size) s.forEach(k => out.add(k));
+    });
+    return out;
   }
 
 
@@ -497,15 +537,16 @@ export async function initSemanticMap({
 
   function computeHoverOrCountryPreview(panelIdx, q, r, { withCtrl=false, withShift=false, withAlt=false } = {}) {
     if (withAlt) {
-      // 取鼠标所在点的国家，返回该国家所有键作为预览
+      // 取鼠标所在点的国家，返回该国家在所有面板的 keys
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
       const cid = hex?.country_id;
-      if (cid) return getCountryKeys(panelIdx, cid);
-      return new Set(); // 没国家就不给预览
+      if (cid) return getCountryKeysGlobal(cid);
+      return new Set();
     }
     // 否则走原有 hover 预览逻辑
     return ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl, withShift });
   }
+
 
   // —— Mode UI：按钮状态（绿色=active，黄色=armed），无 HUD/Chip —— //
   const ModeUI = (() => {
@@ -717,7 +758,10 @@ export async function initSemanticMap({
         const { panelIdx, q, r } = App.hoveredHex;
         const ctrlLike = overrides ? !!(overrides.ctrl || overrides.meta) : !!(App.modKeys.ctrl || App.modKeys.meta);
         const shift    = overrides ? !!overrides.shift : !!App.modKeys.shift;
-        App.highlightedHexKeys = ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl: ctrlLike, withShift: shift });
+        const alt      = overrides ? !!overrides.alt   : !!App.modKeys.alt;
+        App.highlightedHexKeys = alt
+          ? computeHoverOrCountryPreview(panelIdx, q, r, { withCtrl: ctrlLike, withShift: shift, withAlt: alt })
+          : ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl: ctrlLike, withShift: shift });
         updateHexStyles();
       }
 
@@ -898,14 +942,14 @@ export async function initSemanticMap({
 
       // ★ 若正在悬停，重算预览
       if (App.hoveredHex) {
-        const { panelIdx, q, r } = App.hoveredHex;
-        App.highlightedHexKeys = computeHoverPreview(panelIdx, q, r, {
-          withCtrl: (App.modKeys.ctrl || App.modKeys.meta),
-          withShift: App.modKeys.shift,
-          withAlt: App.modKeys.alt
-        });
-        updateHexStyles();
-      }
+          const { panelIdx, q, r } = App.hoveredHex;
+          App.highlightedHexKeys = computeHoverOrCountryPreview(panelIdx, q, r, {
+            withCtrl: (App.modKeys.ctrl || App.modKeys.meta),
+            withShift: App.modKeys.shift,
+            withAlt:  App.modKeys.alt
+          });
+          updateHexStyles();
+        }
 
     };
  
@@ -1154,12 +1198,19 @@ export async function initSemanticMap({
     const cmap = new Map(); // country_id -> Set(keys)
     hexList.forEach(h => {
       if (!h.country_id) return;
+      const normId = normalizeCountryId(h.country_id);  // ★ 归一化
       const k = `${panelIdx}|${h.q},${h.r}`;
-      if (!cmap.has(h.country_id)) cmap.set(h.country_id, new Set());
-      cmap.get(h.country_id).add(k);
+      if (!cmap.has(normId)) cmap.set(normId, new Set());
+      cmap.get(normId).add(k);
     });
     App.countryKeysByPanel[panelIdx] = cmap;
 
+    // ★ 新增：合并到全局索引
+    cmap.forEach((set, cid) => {
+      if (!App.countryKeysGlobal.has(cid)) App.countryKeysGlobal.set(cid, new Set());
+      const gset = App.countryKeysGlobal.get(cid);
+      set.forEach(k => gset.add(k));   // k 形如 "panel|q,r"
+    });
 
     // 初始/持久化变换
     const savedZoom = App.panelStates[panelIdx]?.zoom;
@@ -2264,6 +2315,7 @@ function observePanelResize() {
   function renderSemanticMapFromData(data) {
     App.currentData = data;
     App._lastLinks = data.links || [];
+    App.countryKeysGlobal = new Map();   // ★ 新增：全量重建前清空
 
     // ★ 给每条 link 分配稳定 id（若已有 id 则复用，否则生成 _uid）
     let _uidSeq = 0;
@@ -2520,6 +2572,15 @@ function _deleteSubspaceByIndex(idx) {
     setOnMainTitleRename(fn) {
       App.onMainTitleRename = typeof fn === 'function' ? fn : null;
     },
+    setCountryIdAlias(aliasObj = {}) {
+      App.countryIdAlias = new Map(Object.entries(aliasObj || {}));
+      // 重新基于现有渲染数据构建索引，让别名立刻生效
+      (App.currentData?.subspaces || []).forEach((space, i) => {
+        renderHexGridFromData(i, space, App.config.hex.radius);
+      });
+      updateHexStyles();
+    },
+
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
       // 当存在“整条线路选择”时，优先使用路线快照（会把被排除点跨过去，得到 A-C 这样的新边）
