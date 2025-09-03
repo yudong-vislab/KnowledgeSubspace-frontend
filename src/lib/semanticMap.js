@@ -23,7 +23,7 @@ const STYLE = {
   OPACITY_ALT_ACTIVE: 0.95,     // 当前国家的格子
   OPACITY_ALT_OTHER:  0.08,     // 其它国家/无归属格子
   BORDER_ALT_ACTIVE:  0.95,     // 当前国家的边界线透明度
-  BORDER_ALT_OTHER:   0.18,      // 其它国家的边界线透明度（含虚线）
+  BORDER_ALT_OTHER:   0,      // 其它国家的边界线透明度（含虚线）
 
   CITY_RADIUS: 3.5,
   CITY_BORDER_WIDTH: 1.2,
@@ -1516,7 +1516,7 @@ export async function initSemanticMap({
         .attr('x2', b[0]).attr('y2', b[1])
         .attr('stroke', App.config.countryBorder.color)
         .attr('stroke-width', App.config.countryBorder.width)
-        .attr('stroke-opacity', focusCid ? 0.12 : 1)   // ★ Alt 时变浅；否则保持原来 1
+        .attr('stroke-opacity', focusCid ? STYLE.BORDER_ALT_OTHER : 1)   // ★ Alt 时变浅；否则保持原来 1
         .attr('stroke-dasharray', dashed ? '6,4' : null)
         .attr('pointer-events', 'none');
     });
