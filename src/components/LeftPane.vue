@@ -48,182 +48,294 @@ function handleUploadFiles(files) { /* … */ }
 
 // **************************************************************
 //write by: lc
-//date: 2025-08-19
+//date: 2025-09-03
 //使用d3绘制paperList
 // D3.js 图表逻辑
-let selectedPaperIDs = []; // 全局数组记录选中的 paper_id
-let rectDefaultColor = {}; // 保存每个rect默认颜色，方便恢复
-let selectedPapers = [];
+let selectedPaperIndexs = []; // 全局数组记录选中的 paper_id
 const chartContainerRef = ref(null);
-let colorScale = [];
+// 眼睛图标的 SVG 路径数据
+const eyePathData = "M12 4.5c-6.627 0-12 7.072-12 7.5s5.373 7.5 12 7.5 12-7.072 12-7.5-5.373-7.5-12-7.5zm0 12c-2.485 0-4.5-2.015-4.5-4.5s2.015-4.5 4.5-4.5 4.5 2.015 4.5 4.5-2.015 4.5-4.5 4.5zm0-7.5c-1.657 0-3 1.343-3 3s1.343 3 3 3 3-1.343 3-3-1.343-3-3-3z";
 
 function generateRandomData() {
-  const categories = ['Methods', 'Results', 'Subspace3', 'Subspace4', 'Subspace5', 'Subspace6'];
-  const data = [];
-  const overallStartYear = 1990;
-  const overallEndYear = 2025;
+  const domains = ["Chemistry", "Society", "Visualization"];
+  let globalIndex = 1;
 
-  categories.forEach(category => {
-    const categoryData = { category: category, Val: [] };
-    const startYear = overallStartYear + Math.floor(Math.random() * (overallEndYear - overallStartYear));
-    const endYear = startYear + 1 + Math.floor(Math.random() * (overallEndYear - startYear));
-    const years = Array.from({ length: endYear - startYear }, (_, i) => startYear + i);
+  function randomPaper(index) {
+    // 模拟图片路径
+    const images = [
+      '2025-09-03_152404.png',
+      '2025-09-03_152507.png',
+      '2025-09-03_152535.png',
+      '2025-09-03_152602.png'
+    ].map(fileName => {
+      // `../assets/pictures/` 是相对于当前组件文件而言的相对路径
+      return new URL(`../assets/pictures/${fileName}`, import.meta.url).href;
+    });
+    // 模拟 PDF 文件路径和名称
+    const filenames = [
+      '2019-Air pollution a global problem needs local fixes.pdf',
+      '2019-AirInsight Visual Exploration and Interpretation of Latent Patterns and Anomalies in Air Quality Data.pdf',
+      '2019-AirVis Visual Analytics of Air Pollution Propagation.pdf',
+      '2019-Visual Exploration of Air Quality Data with a Time-correlation-partitioning Tree Based on Information Theory.pdf'
+    ];
 
-    years.forEach(year => {
-      const paperCount = Math.floor(Math.random() * 8) + 1;
-      const paperlist = Array.from({ length: paperCount }, (_, i) => ({
-        paper_id: Math.floor(Math.random() * 1000),
-        paper_source: `Paper-${Math.random().toString(36).substring(7)}`
-      }));
-      categoryData.Val.push({ year: year, paperlist: paperlist });
+    const pdfs = filenames.map(filename => {
+      return new URL(`../assets/pdf/${filename}`, import.meta.url).href;
     });
 
-    data.push(categoryData);
+    const randomImage = images[Math.floor(Math.random() * images.length)];
+    const randomPdfUrl = pdfs[Math.floor(Math.random() * pdfs.length)];
+    const paperName = `Paper ${globalIndex}`;
+
+    return {
+      name: paperName,
+      id: `${index}`,
+      globalIndex: globalIndex++,
+      year: (2000 + Math.floor(Math.random() * 26)).toString(),
+      count: Math.floor(Math.random() * 40),
+      content: randomImage, // 使用 content 字段存储图片路径
+      pdfUrl: randomPdfUrl,
+      domain: domains[Math.floor(Math.random() * domains.length)]
+    };
+  }
+
+  return domains.map(domain => {
+    const paperCount = Math.floor(Math.random() * 8) + 1;
+    const papers = Array.from({ length: paperCount }, (_, i) => ({
+      ...randomPaper(i + 1),
+      domain: domain
+    }));
+    return {
+      domain,
+      value: papers,
+      Total: paperCount.toString()
+    };
   });
-  return data;
 }
 
 function drawChart() {
   const chartData = generateRandomData();
   console.log("data:", chartData);
 
-  const margin = { top: 4, right: 10, bottom: 10, left: 40 };
-  const tooltip = d3.select("#paperlistTooltip");
+  // 创建颜色比例尺
+  const domains = ["Chemistry", "Society", "Visualization"];
+  const colors = ["#69b3a2", "#e69f00", "#56b4e9"];
+  const colorScale = d3.scaleOrdinal()
+    .domain(domains)
+    .range(colors);
 
-  // 固定参数
-  const rectWidth = 6;      // 每个年份的宽度
-  const rectPadding = 2;     // 年份之间间隔
-  const groupHeight = 40;    // 每组高度
-  const groupPadding = 30;   // 每组之间间隔
+  // 计算所有分组的论文总数
+  const totalPaperCount = d3.sum(chartData, d => d.value.length);
 
-  // 1. 全局年份范围
-  const allYears = chartData.flatMap(c => c.Val.map(v => v.year));
-  const yearExtent = d3.extent(allYears);
-  const yearRange = d3.range(yearExtent[0], yearExtent[1] + 1);
+  const groupPadding_left = 50;
+  const groupPadding_top = 10;
+  const rectWidth = 34;
+  const rectHeight = 45;
+  const rectPadding_x = 10;
+  const rectPadding_y = 25;
+  const rectsPerRow = 5;
 
-  // 2. 全局最大论文数
-  const maxPaperCount = d3.max(chartData, c =>
-    d3.max(c.Val, v => v.paperlist.length)
-  );
+  const container = d3.select("#paperlistContent");
+  const containerWidth = container.node().clientWidth;
+  const margin = { top: 10, left: 10, right: 20, bottom: 0 };
+  const svgWidth = containerWidth - margin.right;
 
-  // === 自动计算 SVG 尺寸 ===
-  const svgWidth = margin.left*2 + margin.right + yearRange.length * (rectWidth + rectPadding);
-  const svgHeight = margin.top + margin.bottom + chartData.length * (groupHeight + groupPadding);
+  container.html(''); // 清空旧内容
 
-  // 外层容器
-  d3.select(chartContainerRef.value).select("svg").remove();
+  chartData.forEach((domainData, domainIndex) => {
+    const groupDiv = container.append("div");
+    const paperCount = domainData.value.length;
+    const rows = Math.ceil(paperCount / rectsPerRow);
+    const svgHeight = (rectHeight + rectPadding_y) * rows + groupPadding_top;
 
-  const container = d3.select(chartContainerRef.value);
+    const svg = groupDiv.append("svg")
+      .attr("width", svgWidth)
+      .attr("height", svgHeight);
 
-  const svg = container.append("svg")
-    .attr("width", svgWidth)
-    .attr("height", svgHeight)
-    .append("g")
-    .attr("transform", `translate(${margin.left},${margin.top})`);
+    const defs = svg.append("defs");
 
-  // 比例尺
-  const xScale = d3.scaleBand()
-    .domain(yearRange)
-    .range([0, yearRange.length * (rectWidth + rectPadding)])
-    .padding(0.1);
+    // 为每个数据项创建一个独立的 pattern
+    defs.selectAll("pattern")
+      .data(domainData.value)
+      .enter()
+      .append("pattern")
+      .attr("id", d => `image-pattern-${d.globalIndex}`) // 使用唯一 globalIndex
+      .attr("width", 1)
+      .attr("height", 1)
+      .attr("patternContentUnits", "objectBoundingBox")
+      .append("image")
+      .attr("xlink:href", d => d.content) // 使用 content 作为图片路径
+      .attr("width", 1)
+      .attr("height", 1)
+      .attr("preserveAspectRatio", "xMidYMid slice");
 
-  const yScale = d3.scaleLinear()
-    .domain([0, maxPaperCount])
-    .range([groupHeight, 0]);
+    const rectGroup = svg.append("g")
+      .attr("transform", `translate(${groupPadding_left},${0})`);
 
-  colorScale = d3.scaleOrdinal()
-    .domain(chartData.map(d => d.category))
-    .range(d3.schemeSet3);
+    const paperGroup = rectGroup.selectAll("g.paper-group")
+      .data(domainData.value)
+      .enter()
+      .append("g")
+      .attr("class", "paper-group")
+      .attr("data-global-index", d => d.globalIndex) // 添加 data 属性
+      .attr("transform", (d, i) => {
+        const col = i % rectsPerRow;
+        const row = Math.floor(i / rectsPerRow);
+        const x = col * (rectWidth + rectPadding_x);
+        const y = groupPadding_top + row * (rectHeight + rectPadding_y);
+        return `translate(${x},${y})`;
+      });
 
-  // 每组子图
-  chartData.forEach((categoryData, i) => {
-    const categoryGroup = svg.append("g")
-      .attr("transform", `translate(0, ${i * (groupHeight + groupPadding)})`);
+    // 绘制矩形
+    paperGroup.append("rect")
+      .attr("rx", 4)
+      .attr("ry", 4)
+      .attr("width", rectWidth)
+      .attr("height", rectHeight)
+      // 使用颜色比例尺来填充边框
+      .attr("stroke", d => colorScale(d.domain))
+      .attr("stroke-width", 2)
+      .style("opacity", 1)
+      .attr("fill", d => `url(#image-pattern-${d.globalIndex})`)
+      .style("cursor", "pointer")
+      .on("mousemove", (event, d) => {
+        d3.select("#paperlistTooltip")
+          .style("display", "block")
+          .style("left", (event.pageX + 10) + "px")
+          .style("top", (event.pageY + 10) + "px")
+          .html(`
+                            <strong>ID:</strong> ${d.id}<br/>
+                            <strong>Year:</strong> ${d.year}<br/>
+                            <strong>Count:</strong> ${d.count}
+                        `);
+      })
+      .on("mouseout", (event, d) => {
+        d3.select("#paperlistTooltip").style("display", "none");
+      })
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        const index = selectedPaperIndexs.indexOf(d.globalIndex);
 
-    // 横轴（每 5 年一个 tick）
-    const representativeTicks = d3.range(yearExtent[0], yearExtent[1] + 1, 5);
-    const xAxis = d3.axisBottom(xScale)
-      .tickValues(representativeTicks)
-      .tickSize(3)
-      .tickSizeOuter(0)
-      .tickFormat(d3.format("d"));
+        if (index > -1) {
+          // 如果已存在，移除
+          selectedPaperIndexs.splice(index, 1);
+        } else {
+          // 如果不存在，添加
+          selectedPaperIndexs.push(d.globalIndex);
+        }
 
-    categoryGroup.append("g")
-      .attr("class", "x-axis")
-      .attr("transform", `translate(${margin.left * 0.4}, ${groupHeight})`)
-      .call(xAxis);
+        // 重新更新所有论文的透明度
+        d3.selectAll(".paper-group")
+          .style("opacity", (paperData) => {
+            // 如果selectedPaperIndexs为空，所有论文都恢复正常
+            if (selectedPaperIndexs.length === 0) {
+              return 1;
+            }
+            // 如果论文的 globalIndex 在选中数组中，则透明度为1
+            if (selectedPaperIndexs.includes(paperData.globalIndex)) {
+              return 1;
+            } else {
+              // 否则，透明度为0.5
+              return 0.5;
+            }
+          });
+      });
 
-    // 纵轴
-    const yAxis = d3.axisLeft(yScale).ticks(4).tickSize(3).tickSizeOuter(0);
-    categoryGroup.append("g")
-      .attr("transform", `translate(${margin.left * 0.4}, ${0})`)
-      .attr("class", "y-axis")
-      .call(yAxis);
+    paperGroup.append("text")
+      .attr("text-anchor", "middle")
+      .attr("font-size", "8px")
+      .attr("fill", "#000")
+      .attr("x", rectWidth / 2)
+      .attr("y", rectHeight + 10)
+      .each(function (d) {
+        d3.select(this).append("tspan")
+          .attr("x", d3.select(this).attr("x"))
+          .attr("dy", 0)
+          .text(`ID:${d.id}`);
+      });
 
-    // 绘制每一年下的所有 paper rect
-    categoryData.Val.forEach(yearData => {
-      categoryGroup.selectAll(`.rect-${yearData.year}`)
-        .data(yearData.paperlist)
-        .join("rect")
-        .each(d => { d.category = categoryData.category; })  // 给每个 d 添加 category
-        .attr("class", `rect-${yearData.year}`)
-        .attr("x", margin.left * 0.4 + xScale(yearData.year) + xScale.bandwidth() / 4 - rectPadding / 2)
-        .attr("y", (d, j) => yScale(j + 1))
-        .attr("width", rectWidth)
-        .attr("height", groupHeight / maxPaperCount)
-        .attr("fill", d => {
-          const defaultColor = colorScale(categoryData.category);
-          rectDefaultColor[d.paper_id] = defaultColor; // 保存默认颜色
-          return defaultColor;
-        })
-        .attr("rx", 1)
-        .attr("ry", 1)
-        .style("stroke", "#333")
-        .style("stroke-width", 0.8)
-        .on("mouseover", function (event, d) {
-          tooltip.style("display", "block")
-            .html(`Paper ID: ${d.paper_id}<br>Source: ${d.paper_source}`);
+    paperGroup.append("path")
+      .attr("d", eyePathData)
+      .attr("transform", `scale(0.5) translate(${rectWidth / 0.5 / 2 - 10}, ${rectHeight / 0.5 + 20})`)
+      .style("cursor", "pointer")
+      .style("fill", "#D3D3D3")
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        showPdfModal(d.pdfUrl, d.name);
+      })
+      .on("mouseover", function () {
+        d3.select(this).style("fill", "#007bff");
+      })
+      .on("mouseout", function () {
+        d3.select(this).style("fill", "#D3D3D3");
+      });
 
-          // 鼠标悬停变暗，但如果已选红色，则不变
-          if (!selectedPaperIDs.includes(d.paper_id)) {
-            d3.select(this).attr("fill", d3.rgb(colorScale(categoryData.category)).darker(1));
-          }
-        })
-        .on("mousemove", function (event) {
-          tooltip.style("left", (event.pageX + 10) + "px")
-            .style("top", (event.pageY + 10) + "px");
-        })
-        .on("mouseout", function (event, d) {
-          tooltip.style("display", "none");
 
-          // 只有未选中的 rect 才恢复默认色
-          if (!selectedPaperIDs.includes(d.paper_id)) {
-            d3.select(this).attr("fill", colorScale(categoryData.category));
-          }
-        })
-        .on("click", function (event, d) {
-          const index = selectedPaperIDs.indexOf(d.paper_id);
-          if (index === -1) {
-            selectedPaperIDs.push(d.paper_id);  // 记录点击
-            d3.select(this).attr("fill", "red"); // 变红
-            selectedPapers.push({ paper_id: d.paper_id, category: categoryData.category });
-          } else {
-            selectedPaperIDs.splice(index, 1);   // 取消选择
-            d3.select(this).attr("fill", colorScale(categoryData.category)); // 恢复默认色
-          }
-        });
+    // 绘制半圆饼图
+    const pieinnerRadius = 14;
+    const pieouterRadius = 20;
+    const pieGroup = svg.append("g")
+      .attr("transform", `translate(25, ${groupPadding_top * 4})`);
 
-      ;
-    });
+    const pieData = d3.pie()
+      .sort(null)
+      .startAngle(-Math.PI / 2)
+      .endAngle(Math.PI / 2)
+      .value(d => d)([paperCount, totalPaperCount - paperCount]);
 
-    // 类别标题
-    categoryGroup.append("text")
-      .attr("x", -margin.left)
-      .attr("y", 20)
+    const arcGenerator = d3.arc()
+      .innerRadius(pieinnerRadius)
+      .outerRadius(pieouterRadius);
+
+    const arcColors = [colorScale(domainData.domain), "#ddd"];
+
+    pieGroup.selectAll("path")
+      .data(pieData)
+      .enter()
+      .append("path")
+      .attr("d", arcGenerator)
+      .attr("fill", (d, i) => arcColors[i]);
+
+    // 将文本拆分为两行
+    const pieText = pieGroup.append("text")
+      .attr("text-anchor", "middle")
+      .attr("fill", "#000");
+
+    pieText.append("tspan")
+      .attr("x", 0)
+      .attr("dy", 0)
+      .attr("font-size", "10px")
+      .text(`${paperCount}/${totalPaperCount}`);
+
+    pieText.append("tspan")
+      .attr("x", 0)
+      .attr("dy", "1.2em") // 往下移动一行
+      .attr("font-size", "8px")
       .attr("font-weight", "bold")
-      .attr("font-size", 10)
-      .text(categoryData.category);
+      .attr("fill", colorScale(domainData.domain))
+      .text(domainData.domain);
+
+
+    if (domainIndex < chartData.length - 1) {
+      svg.append("line")
+        .attr("x1", margin.left)
+        .attr("y1", svgHeight)
+        .attr("x2", svgWidth - margin.right / 2)
+        .attr("y2", svgHeight)
+        .attr("stroke", "black")
+        .attr("stroke-width", 2)
+        .attr("stroke-dasharray", "4 2");
+    }
   });
+
+  d3.select("#closeModalBtn").on("click", hidePdfModal);
+  d3.select("#modalOverlay").on("click", (event) => {
+    if (event.target === d3.select("#modalOverlay").node()) {
+      hidePdfModal();
+    }
+  });
+
+
 }
 
 onMounted(() => {
@@ -232,20 +344,36 @@ onMounted(() => {
   new ResizeObserver(drawChart).observe(chartContainerRef.value);
 });
 
+function showPdfModal(pdfUrl, pdfName) {
+  const modalOverlay = d3.select("#modalOverlay");
+  const pdfFrame = d3.select("#pdfFrame");
+  const pdfTitle = d3.select("#pdfTitle");
+
+  pdfTitle.text(pdfName);
+  pdfFrame.attr("src", pdfUrl);
+  modalOverlay.style("display", "flex");
+}
+
+function hidePdfModal() {
+  const modalOverlay = d3.select("#modalOverlay");
+  const pdfFrame = d3.select("#pdfFrame");
+  const pdfTitle = d3.select("#pdfTitle");
+
+  pdfFrame.attr("src", "");
+  pdfTitle.text("PDF Viewer");
+  modalOverlay.style("display", "none");
+
+}
+
 async function onSelectPaper() {
-  console.log("Selected Paper IDs:", selectedPaperIDs);
-  alert("Selected Paper IDs: " + selectedPaperIDs.join(", "));
+  console.log("Selected Paper Indexs:", selectedPaperIndexs);
+  alert("Selected Paper Indexs: " + selectedPaperIndexs.join(", "));
 }
 async function onClearPaper() {
   // 清空已选数组
-  selectedPaperIDs = [];
-
-  // 遍历所有 rect，恢复颜色
-  d3.selectAll("rect").each(function (d) {
-    if (d && d.category) {
-      d3.select(this).attr("fill", colorScale(d.category));
-    }
-  });
+  console.log("ffffffffffffffgg");
+  selectedPaperIndexs = [];
+  d3.selectAll(".paper-group").style("opacity", 1);
 }
 // **************************************************************
 
@@ -280,7 +408,17 @@ async function onClearPaper() {
         </div>
       </header>
       <div class="lp-card__body scroll-auto-hide" ref="chartContainerRef"></div>
-      <div id="paperlistTooltip" class="paper-tooltip"></div>
+      <div id="paperlistContent" style="width: 318px; height: 190px; overflow: auto;"></div>
+
+      <div id="modalOverlay" style="z-index: 99999;">
+        <div id="pdfModal">
+          <span id="closeModalBtn">&times;</span>
+          <h3 id="pdfTitle">PDF Viewer</h3>
+          <iframe id="pdfFrame"></iframe>
+        </div>
+      </div>
+
+      <div id="paperlistTooltip"></div>
     </section>
 
     <!-- 3) 对话区（消息 + 输入条） -->
@@ -465,5 +603,63 @@ async function onClearPaper() {
   gap: 8px;
   /* 两个按钮间距 */
   float: right;
+}
+
+/* 遮罩层样式 */
+#modalOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  display: none;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+/* 模态框样式 */
+#pdfModal {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  width: 80%;
+  max-width: 800px;
+  height: 80%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  z-index: 9999;
+}
+
+#pdfModal iframe {
+  flex-grow: 1;
+  border: none;
+  z-index: 9999;
+}
+
+/* 关闭按钮样式 */
+#closeModalBtn {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  font-size: 24px;
+  cursor: pointer;
+  color: #333;
+  z-index: 9999;
+}
+
+/* 原始代码的样式 */
+#paperlistTooltip {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  pointer-events: none;
+  display: none;
 }
 </style>
