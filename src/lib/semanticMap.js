@@ -12,12 +12,18 @@ const STYLE = {
   HEX_FILL_IMAGE: '#a6cee3',
   HEX_FILL_DEFAULT: '#ffffff',
 
-  OPACITY_DEFAULT: 0.3,
-  OPACITY_HOVER: 0.8,
+  OPACITY_DEFAULT: 0.2,
+  OPACITY_HOVER: 1.0,
   OPACITY_SELECTED: 1.0,
   OPACITY_NEIGHBOR: 0.6,
-  OPACITY_PREVIEW: 0.6,      // 预览（待选）态透明度
+  OPACITY_PREVIEW: 0.8,      // 预览（待选）态透明度
   HATCH_ID: 'preview-hatch', // 预览斜线填充的 <pattern> id
+
+  // --- ALT（国家预览）态 ---
+  OPACITY_ALT_ACTIVE: 0.95,     // 当前国家的格子
+  OPACITY_ALT_OTHER:  0.08,     // 其它国家/无归属格子
+  BORDER_ALT_ACTIVE:  0.95,     // 当前国家的边界线透明度
+  BORDER_ALT_OTHER:   0.18,      // 其它国家的边界线透明度（含虚线）
 
   CITY_RADIUS: 3.5,
   CITY_BORDER_WIDTH: 1.2,
@@ -44,8 +50,9 @@ const STYLE = {
   RIVER_OPACITY: 0.88,
   RIVER_DASH: null,
 
-  COUNTRY_BORDER_COLOR: '#000000',
-  COUNTRY_BORDER_WIDTH: 1.5,
+  COUNTRY_BORDER_COLOR: '#292929ff',
+  COUNTRY_BORDER_WIDTH: 1,
+  COUNTRY_BORDER_DASH: "2,1",
 
   PLAYGROUND_PADDING: 12,
   CLICK_DELAY: 350,
@@ -59,6 +66,7 @@ const STYLE = {
    // --- preview 透明度 ---
   OPACITY_PREVIEW_CENTER: 0.85,   // 鼠标所在 hex（中心）
   OPACITY_PREVIEW_NEIGHBOR: 0.7,  // 与中心点“有关系”的预览邻居
+  OPACITY_ALT_FADE: 0.08,   // Alt 国家聚焦时：非该国家的 hex 统一降到这层透明度
 
   // --- 斜线阴影样式 ---
   HATCH_SPACING: 5,               // 斜线间距（px）
@@ -111,6 +119,7 @@ export async function initSemanticMap({
         textFill: STYLE.HEX_FILL_TEXT,
         imageFill: STYLE.HEX_FILL_IMAGE,
         zIndex: 1,
+        borderDash: STYLE.COUNTRY_BORDER_DASH,
       },
       city: {
         radius: STYLE.CITY_RADIUS,
@@ -171,6 +180,7 @@ export async function initSemanticMap({
     selectedRouteIds: new Set(),   // ★ 新增：当前被选中的“整条线路”的 id 集合（统计 road/river/flight）
     modKeys: { ctrl: false, meta: false, shift: false, alt: false },
     _lastSnapshot: null,
+    activeAltCountry: null,
 
     // 每个 panel 的 { country_id -> Set<"panel|q,r"> }
     countryKeysByPanel: [],
@@ -178,12 +188,15 @@ export async function initSemanticMap({
     // 回调 & 容器
     onSubspaceRename: null,
     onMainTitleRename: null,
+    // ★ FIX: 点击 hex 时把完整 MSU 数据抛给上层（可选）
+    onHexClick: null,
     playgroundEl,
     globalOverlayEl,
 
     // 数据
     currentData: null,
     countryKeysGlobal: new Map(),   // ★ 新增：全局 { country_id -> Set("panel|q,r") }
+    focusCountryId: null,   // ★ 当前 Alt 高亮的国家（跨面板生效）
 
   };
 
@@ -212,22 +225,39 @@ export async function initSemanticMap({
       .concat([[radius, 0]]);
   };
 
-  function getCountryKeysGlobal(countryId) {
-    const s = App.countryKeysGlobal?.get(countryId);
-    return new Set(s || []);
+  function getCountryKeys(panelIdx, countryId) {
+    const m = App.countryKeysByPanel?.[panelIdx];
+    if (!m) return new Set();
+    return new Set(m.get(countryId) || []);
   }
 
-
-  // 聚合所有面板中同一国家的 hex 键
-  function getCountryKeysAcrossPanels(countryId) {
+  // ★ NEW：跨子空间取“同一个 country_id”的全部 key
+  function getCountryKeysGlobal(countryId) {
     const out = new Set();
-    (App.countryKeysByPanel || []).forEach(cmap => {
-      if (!cmap) return;
-      const s = cmap.get(countryId);
+    (App.countryKeysByPanel || []).forEach((m) => {
+      const s = m?.get(countryId);
       if (s && s.size) s.forEach(k => out.add(k));
     });
     return out;
   }
+
+
+  // ★ FIX: 访问全量 msu_index 并解析
+  function getMSUIndex() {
+    // 允许 key 是字符串或数字；JS 访问时会自动转字符串
+    return (App.currentData && App.currentData.msu_index) || {};
+  }
+  function resolveMSUs(msuIds) {
+    const idx = getMSUIndex();
+    const out = [];
+    (msuIds || []).forEach((id) => {
+      // 兼容字符串/数字 id
+      const rec = idx[id] ?? idx[String(id)];
+      if (rec) out.push(rec);
+    });
+    return out;
+  }
+
 
   // ★ 可选：国家 ID 归一化（当不同面板用不同 id 表示同一国家时）
   // 用 controller.setCountryIdAlias(...) 可注入 { "p0_c1":"CN", "p1_c01":"CN" } 这样的映射
@@ -537,13 +567,13 @@ export async function initSemanticMap({
 
   function computeHoverOrCountryPreview(panelIdx, q, r, { withCtrl=false, withShift=false, withAlt=false } = {}) {
     if (withAlt) {
-      // 取鼠标所在点的国家，返回该国家在所有面板的 keys
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
-      const cid = hex?.country_id;
-      if (cid) return getCountryKeysGlobal(cid);
+      const cid = hex?.country_id || null;
+      App.focusCountryId = cid || null;     // ★ 设置全局焦点国家
+      if (cid) return getCountryKeys(panelIdx, cid);
       return new Set();
     }
-    // 否则走原有 hover 预览逻辑
+    // 非 Alt：保持原逻辑
     return ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl, withShift });
   }
 
@@ -951,6 +981,10 @@ export async function initSemanticMap({
           updateHexStyles();
         }
 
+      if (!down && e.key === 'Alt') {
+        App.activeAltCountry = null;   // ★ 退出 ALT，清掉当前国家
+      }
+
     };
  
     const onKeyDown = (e) => setFromEvent(e, true);
@@ -1281,7 +1315,8 @@ export async function initSemanticMap({
             App.highlightedHexKeys = computeHoverOrCountryPreview(panelIdx, d.q, d.r, { withCtrl, withShift, withAlt });
   
             updateHexStyles();
-          }).on('mouseout', (event, d) => {
+          })
+          .on('mouseout', (event, d) => {
             if (App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r) {
               App.hoveredHex = null;
             }
@@ -1291,10 +1326,15 @@ export async function initSemanticMap({
                 App.flightHoverTarget.r === d.r) {
               App.flightHoverTarget = null;
             }
+            if (!App.modKeys.alt) {
+              App.focusCountryId = null; // ★ Alt 不按时，退出焦点国家
+            }
             // ★ 清空预览
             App.highlightedHexKeys.clear();
             updateHexStyles();
-          }).on('click', (event, d) => {
+          })
+          
+          .on('click', (event, d) => {
             event.preventDefault();
             event.stopPropagation();
             // 阻断双击序列里的单击
@@ -1306,6 +1346,23 @@ export async function initSemanticMap({
             App._clickTimer = setTimeout(() => {
               handleSingleClick(panelIdx, d.q, d.r, withCtrl, withShift);
             }, STYLE.CLICK_DELAY);
+            // ★ FIX: 立即把这格的完整数据抛给上层（不等状态机完成）
+            if (typeof App.onHexClick === 'function') {
+              const hex = App.hexMapsByPanel?.[panelIdx]?.get(`${d.q},${d.r}`) || d;
+              const msu_ids = Array.isArray(hex?.msu_ids) ? hex.msu_ids : [];
+              const msu = resolveMSUs(msu_ids);
+              try {
+                App.onHexClick({
+                  panelIdx,
+                  q: d.q, r: d.r,
+                  modality: hex?.modality || '',
+                  country_id: hex?.country_id || null,
+                  label: hex?.label || `${d.q},${d.r}`,
+                  msu_ids,
+                  msu
+                });
+              } catch (e) { console.warn(e); }
+            }
 
           }).on('dblclick', (event, d) => {
             event.preventDefault(); event.stopPropagation();
@@ -1337,8 +1394,8 @@ export async function initSemanticMap({
     const container = svg.select('g');
     container.selectAll('.country-border').remove();
 
-    // 1) 建立该 panel 上的“归属表”：每个(q,r) -> 被哪些国家认领
-    const claimMap = new Map(); // key: "q,r" -> Set(country_id)
+    // 1) claimMap: (q,r) -> Set(country_id)
+    const claimMap = new Map();
     (space.countries || []).forEach(cn => {
       const cid = cn.country_id;
       (cn.hexes || []).forEach(h => {
@@ -1348,82 +1405,107 @@ export async function initSemanticMap({
       });
     });
 
-    // 2) 工具：从 hex 中取其像素中心；六边形6个顶点（flat-top）
+    // 2) 像素位置索引
     const hexDict = new Map();
     container.selectAll('g.hex').each(function(d){
-      hexDict.set(`${d.q},${d.r}`, { x: d.x, y: d.y, panelIdx: d.panelIdx });
+      hexDict.set(`${d.q},${d.r}`, { x: d.x, y: d.y });
     });
     const dirs = [[+1,0],[0,+1],[-1,+1],[-1,0],[0,-1],[+1,-1]];
     const hexCorner = (i) => {
       const ang = Math.PI/3 * i;
       return [hexRadius*Math.cos(ang), hexRadius*Math.sin(ang)];
     };
-
-    // 3) 扫描所有“存在于 claimMap 的格子”，收集边（带是否冲突）
-    //    边用“端点坐标对”落地，用无向 key 去重
-    const edgeMap = new Map(); // key -> { a:[x,y], b:[x,y], dashed:boolean }
     const edgeKey = (ax,ay,bx,by) => {
-      // 无向边：端点排序后作为 key
       const k1 = `${ax},${ay}`, k2 = `${bx},${by}`;
       return (k1 < k2) ? `${k1}_${k2}` : `${k2}_${k1}`;
     };
-
-    // 给定一个(q,r)与边序号i，生成该边的两端点（像素坐标）
-    function edgeEndpoints(cx, cy, i) {
+    const edgeEndpoints = (cx, cy, i) => {
       const p1 = hexCorner(i);
       const p2 = hexCorner((i+1)%6);
       return [[cx+p1[0], cy+p1[1]], [cx+p2[0], cy+p2[1]]];
-    }
+    };
 
-    // 遍历：每个被认领的格子
+    // 3) 两类边：otherEdges（很浅） 与 focusEdges（正常）
+    const focusCid = App.focusCountryId || null;
+    const otherEdges = new Map(); // key -> {a,b,dashed}
+    const focusEdges = new Map();
+
     claimMap.forEach((currSet, qr) => {
       const [qStr, rStr] = qr.split(',');
       const q = +qStr, r = +rStr;
       const hex = hexDict.get(qr);
-      if (!hex) return; // 没有渲染到画布上的格子就跳过
+      if (!hex) return;
 
-      for (let i=0;i<6;i++) {
-        // 邻居坐标（轴坐标）
+      for (let i=0; i<6; i++) {
         const [dq, dr] = dirs[i];
         const nq = q + dq, nr = r + dr;
         const nKey = `${nq},${nr}`;
-        const nbSet = claimMap.get(nKey) || new Set(); // 邻居可能为空集（无人认领）
+        const nbSet = claimMap.get(nKey) || new Set(); // 邻居可为空（外部）
 
-        // —— 判定是否是“边界”：
-        // 集合完全相同 => 内部边，跳过
+        // 内部边（集合相同）跳过
         const same =
           currSet.size === nbSet.size &&
           [...currSet].every(c => nbSet.has(c));
         if (same) continue;
 
-        // 到这里说明两边归属不同（或一侧为空）=> 需要画边界
-        // 冲突判定：任一侧为“多国认领”
+        // 冲突：任一侧多国认领
         const dashed = (currSet.size > 1) || (nbSet.size > 1);
-
         const [a,b] = edgeEndpoints(hex.x, hex.y, i);
         const k = edgeKey(a[0],a[1], b[0],b[1]);
 
-        // 无向边去重：若已有，继承“冲突优先”（有一次冲突就虚线）
-        const prev = edgeMap.get(k);
-        if (prev) {
-          prev.dashed = prev.dashed || dashed;
+        if (!focusCid) {
+          // ★ 非 Alt：如你之前的逻辑（全部国家一起画）
+          const prev = otherEdges.get(k);
+          if (prev) prev.dashed = prev.dashed || dashed;
+          else otherEdges.set(k, { a, b, dashed });
         } else {
-          edgeMap.set(k, { a, b, dashed });
+          // ★ Alt：只把“focus 国家格子与非 focus 邻居”的边划到 focusEdges；
+          // 其余边归 other（很浅显示）
+          const currHasFocus = currSet.has(focusCid);
+          const nbHasFocus   = nbSet.has(focusCid);
+
+          // 只要 curr 有 focus，且邻居“不完全相同”，且（邻居里不含 focus 或为空/他国），就是焦点外边
+          if (currHasFocus && !nbHasFocus) {
+            const prev = focusEdges.get(k);
+            if (prev) prev.dashed = prev.dashed || dashed;
+            else focusEdges.set(k, { a, b, dashed });
+          } else {
+            const prev = otherEdges.get(k);
+            if (prev) prev.dashed = prev.dashed || dashed;
+            else otherEdges.set(k, { a, b, dashed });
+          }
         }
       }
     });
 
-    // 4) 一次性绘制所有边
-    edgeMap.forEach(({a,b,dashed}) => {
+    // 4) 绘制：先 other（淡），再 focus（盖上）
+    // other 很浅
+    otherEdges.forEach(({a,b,dashed}) => {
       container.append('line')
-        .attr('class', 'country-border')
+        .attr('class', 'country-border country-border-other')
         .attr('x1', a[0]).attr('y1', a[1])
         .attr('x2', b[0]).attr('y2', b[1])
         .attr('stroke', App.config.countryBorder.color)
         .attr('stroke-width', App.config.countryBorder.width)
-        .attr('stroke-dasharray', dashed ? '6,4' : null) // ★ 冲突边画虚线
+        .attr('stroke-opacity', focusCid ? 0.12 : 1)   // ★ Alt 时变浅；否则保持原来 1
+        .attr('stroke-dasharray', dashed ? App.config.hex.borderDash : null)
         .attr('pointer-events', 'none');
     });
+
+    // focus 正常（Alt 时只画这个集合的“外边”）
+    if (focusCid) {
+      focusEdges.forEach(({a,b,dashed}) => {
+        container.append('line')
+          .attr('class', 'country-border country-border-focus')
+          .attr('x1', a[0]).attr('y1', a[1])
+          .attr('x2', b[0]).attr('y2', b[1])
+          .attr('stroke', App.config.countryBorder.color)
+          .attr('stroke-width', App.config.countryBorder.width)
+          .attr('stroke-opacity', 1)
+          .attr('stroke-dasharray', dashed ? '6,4' : null)
+          .attr('pointer-events', 'none');
+      });
+    }
   }
 
   /* =========================
@@ -1645,61 +1727,72 @@ export async function initSemanticMap({
 
 
   function updateHexStyles() {
-    // 不再做邻居扩散：仅根据 persistent / excluded / hover / flight 来设透明度
+    const inAltFocus = !!(App.modKeys.alt && App.focusCountryId);
+    const focusCid = inAltFocus ? App.focusCountryId : null;
+
+    // ★ Alt 模式下“同一坐标只显示一次”，避免重复叠加变深
+    const seenInAlt = new Set(); // key: `${panelIdx}|${q},${r}`
+
     App.subspaceSvgs.forEach((svg, panelIdx) => {
       svg.selectAll('g.hex').each(function(d) {
         const gSel = d3.select(this);
-        const path = gSel.select('path');               // 底色 path（已有）
-        const hatch = gSel.select('path.hex-hatch');    // 斜线 path（新加）
-        let opacity = STYLE.OPACITY_DEFAULT;
-        let useHatch = false; // 预览态使用斜线填充
+        const path = gSel.select('path');               // 底色
+        const hatch = gSel.select('path.hex-hatch');    // 斜线
+        const key = `${panelIdx}|${d.q},${d.r}`;
         const baseFill = getHexFillColor(d);
 
-        const key = pkey(panelIdx, d.q, d.r);
-        const isSelected    = App.persistentHexKeys.has(key);
-        const isExcluded    = App.excludedHexKeys.has(key);
-        const isHovered     = App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r;
-        const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
-        const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
+        let opacity = STYLE.OPACITY_DEFAULT;
+        let needHatch = false;
 
-        // 预览集合（App.highlightedHexKeys 里既有中心也有邻居）
-        const isPreview = App.highlightedHexKeys.has(key);
-        const isPreviewCenter =
-          isPreview && (App.hoveredHex?.panelIdx === panelIdx) &&
-          (App.hoveredHex.q === d.q) && (App.hoveredHex.r === d.r);
-        const isPreviewNeighbor = isPreview && !isPreviewCenter;
-
-        // —— 透明度：优先级（选中/中心/邻居/其他）
-        if (isSelected) {
-          opacity = STYLE.OPACITY_SELECTED;                     // 已选：最亮
-        } else if (isHovered || isFlightStart || isFlightHover) {
-          opacity = STYLE.OPACITY_HOVER;                        // 鼠标/航班端点：亮
-        } else if (isPreviewCenter) {
-          opacity = STYLE.OPACITY_PREVIEW_CENTER;               // 待选中心：较亮
-        } else if (isPreviewNeighbor) {
-          opacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;             // 待选邻居：略暗
+        if (inAltFocus) {
+          // ① Alt 高亮：非本国家 → 很浅
+          if (d.country_id !== focusCid) {
+            opacity = 0.08;           // ★ 你想要的“其他都很浅”
+            needHatch = false;
+          } else {
+            // ② 本国家：只保留第一份（避免堆叠加深）
+            if (seenInAlt.has(key)) {
+              opacity = 0;            // 隐藏重复份
+            } else {
+              seenInAlt.add(key);
+              opacity = 0.95;         // ★ 高亮深度（可调）
+            }
+            needHatch = false;
+          }
         } else {
-          opacity = STYLE.OPACITY_DEFAULT;                      // 其他：默认
-        }
-        path.attr('fill-opacity', opacity);
+          // 原先非 Alt 的层级逻辑（保持你的 hover/selected/preview 规则）
+          const isSelected    = App.persistentHexKeys.has(key);
+          const isHovered     = App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r;
+          const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
+          const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
+          const isPreview     = App.highlightedHexKeys.has(key);
+          const isPreviewCenter =
+            isPreview && (App.hoveredHex?.panelIdx === panelIdx) &&
+            (App.hoveredHex.q === d.q) && (App.hoveredHex.r === d.r);
+          const isPreviewNeighbor = isPreview && !isPreviewCenter;
 
-        // —— 斜线阴影：仅给“预览邻居”加阴影，其它都不画
-        const needHatch = isPreviewNeighbor;
+          if (isSelected)        opacity = STYLE.OPACITY_SELECTED;
+          else if (isHovered || isFlightStart || isFlightHover) opacity = STYLE.OPACITY_HOVER;
+          else if (isPreviewCenter)   opacity = STYLE.OPACITY_PREVIEW_CENTER;
+          else if (isPreviewNeighbor) { opacity = STYLE.OPACITY_PREVIEW_NEIGHBOR; needHatch = true; }
+          else                   opacity = STYLE.OPACITY_DEFAULT;
+        }
+
+        // 应用
         hatch.attr('fill', needHatch ? `url(#hex-hatch-${panelIdx})` : 'none');
-
- 
-        // 应用填充（预览态用斜线 pattern，其它用原有颜色）
-        if (useHatch) {
-          path.attr('fill', `url(#${STYLE.HATCH_ID})`);
-        } else {
-          path.attr('fill', baseFill);
-        }
-        path.attr('fill-opacity', opacity);
-
-
+        path.attr('fill', baseFill).attr('fill-opacity', opacity);
       });
     });
+
+    // ★ Alt 焦点边界重绘（所有面板）
+    App.currentData?.subspaces?.forEach((space, i) => {
+      const svg = App.subspaceSvgs[i];
+      if (svg && !svg.empty()) {
+        drawCountries(space, svg, App.config.hex.radius); // 会读 App.focusCountryId
+      }
+    });
   }
+
 
   // 仅取“一跳”邻居（不做整片扩展），返回 Set<"panelIdx|q,r">
   function starKeys(panelIdx, q, r) {
@@ -1887,12 +1980,18 @@ export async function initSemanticMap({
       const panelIdx = +pStr, q = +qStr, r = +rStr;
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
       if (!hex) continue;
+      const msu_ids = Array.isArray(hex.msu_ids) ? hex.msu_ids : [];
+      const msu = resolveMSUs(msu_ids);
       nodes.push({
         id: `${panelIdx}:${q},${r}`,
         panelIdx, q, r,
         label: hex.label || `${q},${r}`,
-        modality: hex.modality || ''
+        modality: hex.modality || '',
+        country_id: hex.country_id || null,
+        msu_ids,            // ★ FIX
+        msu                 // ★ FIX
       });
+
     }
 
     const links = [];
@@ -1991,11 +2090,16 @@ export async function initSemanticMap({
       const panelIdx = +pStr, q = +qStr, r = +rStr;
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
       if (hex) {
+        const msu_ids = Array.isArray(hex.msu_ids) ? hex.msu_ids : [];
+        const msu = resolveMSUs(msu_ids);
         nodes.push({
           id: `${panelIdx}:${q},${r}`,
           panelIdx, q, r,
           label: hex.label || `${q},${r}`,
-          modality: hex.modality || ''
+          modality: hex.modality || '',
+          country_id: hex.country_id || null,
+          msu_ids,            // ★ FIX
+          msu                 // ★ FIX
         });
       }
     });
@@ -2601,6 +2705,28 @@ function _deleteSubspaceByIndex(idx) {
 
       return { ...snap, meta: { focusId } };
     },
+
+        // ★ FIX: 通过坐标直接拿该格完整信息
+    getHexDetail(panelIdx, q, r) {
+      const hex = App.hexMapsByPanel?.[panelIdx]?.get(`${q},${r}`);
+      if (!hex) return null;
+      const msu_ids = Array.isArray(hex.msu_ids) ? hex.msu_ids : [];
+      const msu = resolveMSUs(msu_ids);
+      return {
+        panelIdx, q, r,
+        modality: hex.modality || '',
+        country_id: hex.country_id || null,
+        label: hex.label || `${q},${r}`,
+        msu_ids,
+        msu
+      };
+    },
+
+    // ★ FIX: 设置点击回调
+    setOnHexClick(fn) {
+      App.onHexClick = (typeof fn === 'function') ? fn : null;
+    },
+
 
 
   };
