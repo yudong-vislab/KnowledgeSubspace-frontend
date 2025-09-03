@@ -408,7 +408,7 @@ async function onClearPaper() {
         </div>
       </header>
       <div class="lp-card__body scroll-auto-hide" ref="chartContainerRef"></div>
-      <div id="paperlistContent" style="width: 318px; height: 190px; overflow: auto;"></div>
+      <div id="paperlistContent" style="width: 100%; height: 100%; overflow: auto; padding: 2px;"></div>
 
       <div id="modalOverlay" style="z-index: 99999;">
         <div id="pdfModal">
