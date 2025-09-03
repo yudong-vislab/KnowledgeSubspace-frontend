@@ -75,6 +75,10 @@ const STYLE = {
   HATCH_OPACITY: 0.6,            // 斜线透明度
   HATCH_ANGLE: 45,                // 斜线角度（度）
 
+  FOCUS_COUNTRY_FILL: '#a9d08d',   // Alt 聚焦国家的统一填充色（不区分 modality）
+  OPACITY_NONFOCUS: 0.08,          // Alt 聚焦时，非该国家 hex 的压暗透明度
+
+
 };
 
 // src/lib/semanticMap.js（在 STYLE 下方添加）
@@ -231,15 +235,40 @@ export async function initSemanticMap({
     return new Set(m.get(countryId) || []);
   }
 
-  // ★ NEW：跨子空间取“同一个 country_id”的全部 key
-  function getCountryKeysGlobal(countryId) {
+  function collectCountryKeysAllPanels(countryId) {
     const out = new Set();
-    (App.countryKeysByPanel || []).forEach((m) => {
-      const s = m?.get(countryId);
-      if (s && s.size) s.forEach(k => out.add(k));
+    (App.countryKeysByPanel || []).forEach((map, pIdx) => {
+      if (!map) return;
+      const set = map.get(countryId);
+      if (set && set.size) {
+        set.forEach(k => out.add(k)); // k 已是 "panelIdx|q,r"
+      }
     });
     return out;
   }
+
+  function setCountryFocus(countryId) {
+    const normId = countryId ? normalizeCountryId(countryId) : null;
+    App.focusCountryId = normId;
+
+    // 1) 高亮所有该国家的 hex（跨子空间，已做归一化）
+    if (normId) {
+      App.highlightedHexKeys = getCountryKeysAllPanels(normId);
+    } else {
+      App.highlightedHexKeys.clear();
+    }
+
+    // 2) 让所有 panel 的国家边界按“聚焦国家”重画
+    (App.currentData?.subspaces || []).forEach((space, i) => {
+      const svg = App.subspaceSvgs[i];
+      drawCountries(space, svg, App.config.hex.radius, { focusCountryId: App.focusCountryId });
+    });
+
+    // 3) 刷新样式
+    updateHexStyles();
+  }
+
+
 
 
   // ★ FIX: 访问全量 msu_index 并解析
@@ -566,12 +595,10 @@ export async function initSemanticMap({
   }
 
   function computeHoverOrCountryPreview(panelIdx, q, r, { withCtrl=false, withShift=false, withAlt=false } = {}) {
-    if (withAlt) {
+    if (withAlt && !App.focusCountryId) {
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
-      const cid = hex?.country_id || null;
-      App.focusCountryId = cid || null;     // ★ 设置全局焦点国家
-      if (cid) return getCountryKeys(panelIdx, cid);
-      return new Set();
+      const cid = hex?.country_id ? normalizeCountryId(hex.country_id) : null;
+      return cid ? getCountryKeysAllPanels(cid) : new Set();
     }
     // 非 Alt：保持原逻辑
     return ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl, withShift });
@@ -1306,6 +1333,8 @@ export async function initSemanticMap({
             .style('pointer-events', 'none');     // 阴影不截获事件
 
           g.on('mouseover', (event, d) => {
+            // 若已经处于“国家聚焦”锁定，悬停不再改写高亮集合
+            if (App.focusCountryId) return;
             App.hoveredHex = { panelIdx, q: d.q, r: d.r };
             if (App.flightStart) App.flightHoverTarget = { panelIdx, q: d.q, r: d.r };
             // ★ 根据当前键位/按钮状态计算预览
@@ -1320,18 +1349,17 @@ export async function initSemanticMap({
             if (App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r) {
               App.hoveredHex = null;
             }
-            if (App.flightStart &&
-                App.flightHoverTarget?.panelIdx === panelIdx &&
-                App.flightHoverTarget.q === d.q &&
-                App.flightHoverTarget.r === d.r) {
-              App.flightHoverTarget = null;
+            // if (App.flightStart &&
+            //     App.flightHoverTarget?.panelIdx === panelIdx &&
+            //     App.flightHoverTarget.q === d.q &&
+            //     App.flightHoverTarget.r === d.r) {
+            //   App.flightHoverTarget = null;
+            // }
+            // 锁定聚焦时，不清理；仅在“未锁定”预览态下才清理
+            if (!App.focusCountryId) {
+              App.highlightedHexKeys.clear();
+              updateHexStyles();
             }
-            if (!App.modKeys.alt) {
-              App.focusCountryId = null; // ★ Alt 不按时，退出焦点国家
-            }
-            // ★ 清空预览
-            App.highlightedHexKeys.clear();
-            updateHexStyles();
           })
           
           .on('click', (event, d) => {
@@ -1390,14 +1418,15 @@ export async function initSemanticMap({
     updateHexStyles();
   }
 
-  function drawCountries(space, svg, hexRadius) {
+  function drawCountries(space, svg, hexRadius, opts = {}) {
+    const focusId = opts.focusCountryId || null;
     const container = svg.select('g');
     container.selectAll('.country-border').remove();
 
     // 1) claimMap: (q,r) -> Set(country_id)
     const claimMap = new Map();
     (space.countries || []).forEach(cn => {
-      const cid = cn.country_id;
+      const cid = normalizeCountryId(cn.country_id);
       (cn.hexes || []).forEach(h => {
         const k = `${h.q},${h.r}`;
         if (!claimMap.has(k)) claimMap.set(k, new Set());
@@ -1488,7 +1517,7 @@ export async function initSemanticMap({
         .attr('stroke', App.config.countryBorder.color)
         .attr('stroke-width', App.config.countryBorder.width)
         .attr('stroke-opacity', focusCid ? 0.12 : 1)   // ★ Alt 时变浅；否则保持原来 1
-        .attr('stroke-dasharray', dashed ? App.config.hex.borderDash : null)
+        .attr('stroke-dasharray', dashed ? '6,4' : null)
         .attr('pointer-events', 'none');
     });
 
@@ -1725,7 +1754,6 @@ export async function initSemanticMap({
     }
   }
 
-
   function updateHexStyles() {
     const inAltFocus = !!(App.modKeys.alt && App.focusCountryId);
     const focusCid = inAltFocus ? App.focusCountryId : null;
@@ -1743,6 +1771,33 @@ export async function initSemanticMap({
 
         let opacity = STYLE.OPACITY_DEFAULT;
         let needHatch = false;
+
+        const inHighlight = App.highlightedHexKeys.has(key);
+        const isFocusMode = !!App.focusCountryId;
+
+        // ★★★ Alt 聚焦国家：统一上色 & 压暗其余
+        if (isFocusMode) {
+          // 简单去重：同一个 panel|q,r 只显示一次
+          if (inHighlight) {
+            if (seenInAlt.has(key)) {
+              path.attr('fill-opacity', 0); // 隐藏重复层
+              hatch.attr('fill', 'none');
+              return;
+            }
+            seenInAlt.add(key);
+          }
+          // 填充色：仅聚焦国家统一色，其余走默认底色
+          const fillColor = inHighlight ? STYLE.FOCUS_COUNTRY_FILL : getHexFillColor(d);
+          path.attr('fill', fillColor);
+
+          // 透明度：聚焦国全亮，其余压暗（避免视觉噪声）
+          const op = inHighlight ? STYLE.OPACITY_SELECTED : STYLE.OPACITY_NONFOCUS;
+          path.attr('fill-opacity', op);
+
+          // 聚焦时不再显示预览阴影
+          hatch.attr('fill', 'none');
+          return; // ★ 聚焦态已处理完，后面的普通逻辑不再执行
+        }
 
         if (inAltFocus) {
           // ① Alt 高亮：非本国家 → 很浅
@@ -1791,6 +1846,7 @@ export async function initSemanticMap({
         drawCountries(space, svg, App.config.hex.radius); // 会读 App.focusCountryId
       }
     });
+    
   }
 
 
@@ -2128,6 +2184,15 @@ export async function initSemanticMap({
     const armed = isConnectArmedNow(withCtrl, withShift); // 键盘(Ctrl+Shift) 或 按钮黄灯
     const routeMode = isRouteMode(ctrlLike);              // 键盘(Ctrl/⌘) 或 按钮 Route 绿灯
 
+    // ★★★ Alt 锁定国家聚焦（跨子空间）—— 优先处理
+    if (App.modKeys.alt) {
+      const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
+      const raw = hex?.country_id || null;
+      const cid = raw ? normalizeCountryId(raw) : null;
+      setCountryFocus(cid);
+      return; // Alt 点击只做国家聚焦
+    }
+
     // —— Connect Active：插入模式优先（含“等待锚点”的绿灯）——————————————
     if (App.insertMode) {
       // 4.1 还没有锚点：先确定锚点所在的路线与 index
@@ -2366,10 +2431,15 @@ export async function initSemanticMap({
     });
 
     const onKeyDownGlobal = (e) => {
-      if (!App.insertMode) return;
-      if (e.key === 'Escape') { endInsertMode(false); }
-      if (e.key === 'Enter')  { endInsertMode(true);  }
+      if (e.key === 'Escape') {
+        // 先退插入模式
+        if (App.insertMode) { endInsertMode(false); }
+        // 再退国家聚焦
+        if (App.focusCountryId) { setCountryFocus(null); }
+      }
+      if (e.key === 'Enter')  { if (App.insertMode) endInsertMode(true); }
     };
+
     document.addEventListener('keydown', onKeyDownGlobal);
     cleanupFns.push(() => document.removeEventListener('keydown', onKeyDownGlobal));
 
@@ -2484,6 +2554,7 @@ function observePanelResize() {
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
       App.highlightedHexKeys.clear();
       App.hoveredHex = null;
+      // App.focusCountryId = null;    // ★ 退出国家聚焦
       updateHexStyles();
       publishToStepAnalysis();
 
@@ -2496,6 +2567,11 @@ function observePanelResize() {
     if (e.target === App.playgroundEl) {
       App.flightStart = null;
       App.flightHoverTarget = null;
+
+      // 双击空白才取消国家聚焦
+      App.focusCountryId = null;
+      App.highlightedHexKeys.clear();
+
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
       App.highlightedHexKeys.clear();
       App.hoveredHex = null;  
