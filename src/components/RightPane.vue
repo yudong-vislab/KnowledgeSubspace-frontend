@@ -36,6 +36,9 @@
                 :link="lk"
                 :nodes="step.nodes || []"
                 :start-count-map="step.startCountMap"
+                :colorByCountry="step.colorByCountry"
+                :colorByPanelCountry="step.colorByPanelCountry"
+                :normalizeCountryId="step.normalizeCountryId"
               />
             </div>
           </div>
@@ -81,6 +84,9 @@ onMounted(() => {
       nodes,
       links,
       startCountMap: buildStartCountMap(links),   // ★ 提前算好供子卡片用
+      colorByCountry: payload.colorByCountry || {},
+      colorByPanelCountry: payload.colorByPanelCountry || {},
+      normalizeCountryId: payload.normalizeCountryId || ((x) => x),
       rawText: payload.rawText || '',
       summary: payload.summary || '',
       meta: payload.meta || {}

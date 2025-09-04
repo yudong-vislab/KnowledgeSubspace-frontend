@@ -33,8 +33,11 @@ import { mountMiniLink } from '@/lib/useLinkCard'
 const props = defineProps({
   link:  { type: Object, required: true },
   nodes: { type: Array,  default: () => [] },
-  /** Step 级别传入：每个点作为“起点”的出现次数（决定 city/capital） */
-  startCountMap: { type: Object, default: () => new Map() }
+  startCountMap: { type: Object, default: () => new Map() },
+  colorByCountry: { type: [Object, Map], default: () => ({}) },
+  colorByPanelCountry: { type: [Object, Map], default: () => ({}) },
+  normalizeCountryId: { type: Function, default: (x) => x }  
+  
 })
 
 const svgRef = ref(null)
@@ -44,15 +47,23 @@ onMounted(() => {
   mini = mountMiniLink(svgRef.value, {
     link: props.link,
     nodes: props.nodes,
-    startCountMap: props.startCountMap
+    startCountMap: props.startCountMap,
+    colorByCountry: props.colorByCountry,
+    colorByPanelCountry: props.colorByPanelCountry,
+    normalizeCountryId: props.normalizeCountryId
   })
 })
 
-watch(() => [props.link, props.nodes, props.startCountMap], () => {
+watch(
+  () => [props.link, props.nodes, props.startCountMap, props.colorByCountry, props.colorByPanelCountry, props.normalizeCountryId],
+  () => {
   mini?.update({
     link: props.link,
     nodes: props.nodes,
-    startCountMap: props.startCountMap
+    startCountMap: props.startCountMap,
+    colorByCountry: props.colorByCountry,
+    colorByPanelCountry: props.colorByPanelCountry,
+    normalizeCountryId: props.normalizeCountryId
   })
 }, { deep: true })
 

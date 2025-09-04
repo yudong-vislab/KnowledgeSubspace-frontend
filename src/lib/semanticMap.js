@@ -80,7 +80,6 @@ const STYLE = {
   FOCUS_COUNTRY_FILL: '#FCFCFC',   // Alt 聚焦国家的统一填充色（不区分 modality）
   OPACITY_NONFOCUS: 0.08,          // Alt 聚焦时，非该国家 hex 的压暗透明度
 
-
 };
 
 // src/lib/semanticMap.js（在 STYLE 下方添加）
@@ -94,7 +93,6 @@ const LAYOUT = {
   MIN_W: STYLE.SUBSPACE_MIN_W,
   MIN_H: STYLE.SUBSPACE_MIN_H,
 };
-
 
 /* =========================
  * 初始化入口
@@ -256,29 +254,6 @@ export async function initSemanticMap({
     return out;
   }
 
-  // 面板级聚焦：只影响一个面板
-  function setCountryFocusLocal(panelIdx, countryId, mode = 'filled') {
-    const cid = countryId ? normalizeCountryId(countryId) : null;
-    if (!cid) App.panelFocusOverrides.delete(panelIdx);
-    else App.panelFocusOverrides.set(panelIdx, { countryId: cid, mode });
-
-    // 仅该面板立即重画边界（也可交给 updateHexStyles 统一处理）
-    const space = App.currentData?.subspaces?.[panelIdx];
-    const svg   = App.subspaceSvgs[panelIdx];
-    if (space && svg) {
-      drawCountries(space, svg, App.config.hex.radius, { focusCountryId: cid, focusMode: mode });
-    }
-    updateHexStyles();
-  }
-
-  // 取“有效聚焦”：优先本面板覆盖，其次全局；都没有时为 null
-  function getEffectivePanelFocus(panelIdx) {
-    const local = App.panelFocusOverrides.get(panelIdx);
-    if (local && local.countryId) return { countryId: normalizeCountryId(local.countryId), mode: local.mode || 'filled' };
-    if (App.focusCountryId)       return { countryId: normalizeCountryId(App.focusCountryId), mode: App.focusMode || 'filled' };
-    return { countryId: null, mode: null };
-  }
-
   // —— 简易防抖 —— //
   function debounce(fn, wait = 240) {
     let t = null;
@@ -342,6 +317,30 @@ export async function initSemanticMap({
     });
     return out;
   }
+
+  // —— 颜色快照工具：把面板级国家改色拍扁成两个映射 ——
+  // 1) colorByCountry: { [normCountryId]: "#RRGGBB" }（跨面板统一色，取第一次出现为主）
+  // 2) colorByPanelCountry: { ["panelIdx|normCountryId"]: "#RRGGBB" }（面板内覆盖）
+  function _buildColorMapsSnapshot() {
+    const colorByCountry = {};
+    const colorByPanelCountry = {};
+    if (App && App.panelCountryColors instanceof Map) {
+      App.panelCountryColors.forEach((m, panelIdx) => {
+        if (!(m instanceof Map)) return;
+        m.forEach((rec, rawCid) => {
+          const cid = normalizeCountryId ? normalizeCountryId(rawCid) : rawCid;
+          const hex = rec?.color || null;
+          if (!hex) return;
+          // 面板级
+          colorByPanelCountry[`${panelIdx}|${cid}`] = hex;
+          // 跨面板（第一次写入为主）
+          if (!(cid in colorByCountry)) colorByCountry[cid] = hex;
+        });
+      });
+    }
+    return { colorByCountry, colorByPanelCountry };
+  }
+
 
 
   // 在指定 svg 里确保存在一个用于“预览态”的斜线填充 pattern
@@ -441,13 +440,51 @@ export async function initSemanticMap({
       return `url(#${pid})`;
     }
 
+    // —— 从 App.panelCountryColors 构建小卡片可用的颜色映射 —— //
+    // 返回 { colorByCountry: {...}, colorByPanelCountry: {...} }
+    function _buildMiniColorMaps() {
+      const colorByPanelCountry = {};
+      const colorByCountry = {}; // 目前你主图没有“全局国家改色”，先留空对象
 
-  // === 坐标/变换工具：把 axial(0,0) 精准放到容器中心 =================
-  function axialToXY(q, r, radius = App.config.hex.radius) {
-    // 平顶六边形（flat-top）轴坐标 → 像素
-    // x = 1.5R * q,  y = sqrt(3)R * (r + q/2)
-    return [1.5 * radius * q, Math.sqrt(3) * radius * (r + q / 2)];
+      // 1) 面板级改色（右键调色存这里）：App.panelCountryColors: Map(panelIdx -> Map(countryId -> { color, alphaByKey }))
+      App.panelCountryColors.forEach((countryMap, panelIdx) => {
+        countryMap.forEach((entry, rawCid) => {
+          const cid = normalizeCountryId(rawCid);
+          if (!entry || !entry.color) return;
+
+          // 主键：用“规范化 id”
+          colorByPanelCountry[`${panelIdx}|${cid}`] = entry.color;
+
+          // 兼容：如果你有别名（raw -> canonical），把“原始 id”也一并写入，防止小卡片节点用的是 rawCid
+          // App.countryIdAlias: Map(raw -> canonical)
+          App.countryIdAlias?.forEach((to, from) => {
+            if (to === cid) {
+              colorByPanelCountry[`${panelIdx}|${from}`] = entry.color;
+            }
+          });
+        });
+      });
+
+      // 2) 若以后你做了“全局国家改色”，在这里把 { canonicalCid: color } 写到 colorByCountry 即可
+
+      return { colorByCountry, colorByPanelCountry };
+    }
+
+  function degradeFocusToOutlineFor(panelIdx) {
+    // 面板级优先：如果该面板有本地聚焦，改成 outline
+    const local = App.panelFocusOverrides.get(panelIdx);
+    if (local && local.countryId && local.mode !== 'outline') {
+      App.panelFocusOverrides.set(panelIdx, { countryId: local.countryId, mode: 'outline' });
+      return true;
+    }
+    // 否则退全局：有全局聚焦就把模式改成 outline（不清 countryId）
+    if (App.focusCountryId && App.focusMode !== 'outline') {
+      App.focusMode = 'outline';
+      return true;
+    }
+    return false;
   }
+
 
   // 从当前已选节点集合（persistentHexKeys）推导出涉及到的整条线路，灌入 selectedRouteIds
   function seedSelectedRoutesFromPersistent() {
@@ -869,8 +906,6 @@ function hideColorMenu() {
       return out; // Array<"panelIdx|q,r">
     }
 
-
-
     // —— 预览工具：根据当前模式，计算鼠标悬停点应该高亮的 key 集 —— //
     function computeHoverPreview(panelIdx, q, r, { withCtrl=false, withShift=false } = {}) {
       const ctrlLike   = !!withCtrl;
@@ -1097,9 +1132,6 @@ function hideColorMenu() {
 
     return { setVisualState, computeAndApply, forceGroupDefault, computeHoverPreview };
   })();
-
-
-
 
   function beginInsertMode(route, anchorIdx){
     App.insertMode = { routeId: linkKey(route), anchorIndex: anchorIdx, inserting: true };
@@ -2029,41 +2061,35 @@ function hideColorMenu() {
         const key   = `${panelIdx}|${d.q},${d.r}`;
         const baseFill = getHexFillColor(d);
 
-        // —— 面板级聚焦底层 —— //
+        // —— 国家与 Alt 焦点 —— //
         const thisCid = d.country_id ? normalizeCountryId(d.country_id) : null;
         const isFocusHex = !!(focusCid && thisCid === focusCid);
 
+        // Alt=filled 时你的原底层
         let focusBaseFill    = baseFill;
         let focusBaseOpacity = STYLE.OPACITY_DEFAULT;
         if (focusCid && focusMode === 'filled') {
-          // 默认的“聚焦色 + 非聚焦压暗”
           focusBaseFill    = isFocusHex ? STYLE.FOCUS_COUNTRY_FILL : baseFill;
           focusBaseOpacity = isFocusHex ? STYLE.OPACITY_SELECTED   : STYLE.OPACITY_NONFOCUS;
         }
 
-        // —— 叠加“右键改色”的覆盖（含临时预览） —— //
-        let colorOverride = null;
-        let alphaOverride = null;
+        // —— 已确认颜色覆盖（面板级按国家） —— //
+        const ov = thisCid ? getCountryColorOverride(panelIdx, thisCid) : null;
+        const confirmedColor = ov ? ov.color : null;
+        const confirmedAlpha = ov ? (ov.alphaByKey.get(key) ?? null) : null;
 
-        // 1) 确认过的覆盖（面板级）
-        if (isFocusHex) {
-          const ov = getCountryColorOverride(panelIdx, thisCid);
-          if (ov) {
-            colorOverride = ov.color;
-            alphaOverride = ov.alphaByKey.get(key) ?? null;
-          }
-        }
-
-        // 2) 临时预览覆盖（只在当前 pending 的面板/国家/keys 上生效）
+        // —— 临时预览（仅 Alt 焦点的 pending） —— //
+        let previewColor = null;
+        let previewAlpha = null;
         if (App._pendingColorEdit && isFocusHex) {
           const p = App._pendingColorEdit;
           if (p.panelIdx === panelIdx && p.countryId === thisCid && p.keys.has(key)) {
-            colorOverride = p.color;
-            alphaOverride = p.alphaByKey.get(key) ?? alphaOverride;
+            previewColor = p.color;
+            previewAlpha = p.alphaByKey.get(key) ?? null;
           }
         }
 
-        // —— 原交互层（选中/悬停/预览等） —— //
+        // —— 交互态 —— //
         const isSelected    = App.persistentHexKeys.has(key);
         const isHovered     = !!(App.hoveredHex && App.hoveredHex.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r);
         const isFlightStart = !!(App.flightStart  && App.flightStart.panelIdx  === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r);
@@ -2073,36 +2099,51 @@ function hideColorMenu() {
         const isPreviewCenter   = inPreview && isHovered;
         const isPreviewNeighbor = inPreview && !isPreviewCenter;
 
-        let overlayOpacity = STYLE.OPACITY_DEFAULT;
-        if (isSelected)               overlayOpacity = STYLE.OPACITY_SELECTED;
-        else if (isHovered || isFlightStart || isFlightHover)
-                                      overlayOpacity = STYLE.OPACITY_HOVER;
-        else if (isPreviewCenter)     overlayOpacity = STYLE.OPACITY_PREVIEW_CENTER;
-        else if (isPreviewNeighbor)   overlayOpacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;
+        // —— 计算：是否此刻应使用覆盖色 —— //
+        const hasAnyOverride = !!(previewColor || confirmedColor);
+        const inActiveInteraction = isSelected || isHovered || isPreviewCenter || isPreviewNeighbor || isFlightStart || isFlightHover;
+        const useOverrideColorNow =
+          hasAnyOverride && ( (focusMode === 'filled' && isFocusHex) || inActiveInteraction );
 
-      
-        // —— 合成最终填充与透明度 —— //
-        // 规则：
-        // 1) 若有覆盖色（确认 or 预览）并且 hex 属于焦点国家（filled 模式），使用覆盖色；
-        // 2) 覆盖色时，透明度采用“渐变 alphaOverride”与交互 overlayOpacity 的较大值来保证交互仍可见；
-        // 3) 非覆盖色时，沿用原有焦点/非焦点基底透明度与交互 overlayOpacity 的较大值。
-        let finalFill = (focusCid && focusMode === 'filled' && isFocusHex && colorOverride)
-          ? colorOverride
+        // 1) 最终填充色
+        let finalFill = useOverrideColorNow
+          ? (previewColor || confirmedColor)
           : ((focusCid && focusMode === 'filled') ? focusBaseFill : baseFill);
 
+        // 2) 基底透明度（优先使用每个 hex 保存的 alpha 渐变）
         let baseOpacity = (focusCid && focusMode === 'filled') ? focusBaseOpacity : STYLE.OPACITY_DEFAULT;
-        if (colorOverride && isFocusHex) {
-          baseOpacity = (alphaOverride != null) ? alphaOverride : baseOpacity;
+        if (useOverrideColorNow) {
+          const a = (previewAlpha != null) ? previewAlpha
+                : (confirmedAlpha != null) ? confirmedAlpha
+                : null;
+          if (a != null) baseOpacity = a;
+        } else if (isSelected && !hasAnyOverride) {
+          // 没有覆盖色时，选中态维持老逻辑更亮一些
+          baseOpacity = Math.max(baseOpacity, STYLE.OPACITY_SELECTED);
         }
+
+        // 3) 交互叠加透明度（不要把有覆盖色的选中态硬拉到 1）
+        let overlayOpacity = STYLE.OPACITY_DEFAULT;
+        if (isHovered || isFlightStart || isFlightHover) {
+          overlayOpacity = STYLE.OPACITY_HOVER;
+        } else if (isPreviewCenter) {
+          overlayOpacity = STYLE.OPACITY_PREVIEW_CENTER;
+        } else if (isPreviewNeighbor) {
+          overlayOpacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;
+        } else if (isSelected && !useOverrideColorNow) {
+          overlayOpacity = STYLE.OPACITY_SELECTED;
+        }
+
         const finalOpacity = Math.max(baseOpacity, overlayOpacity);
 
+        // 预览邻居的斜线填充
         const needHatch = isPreviewNeighbor;
         hatch.attr('fill', needHatch ? `url(#hex-hatch-${panelIdx})` : 'none');
         path .attr('fill', finalFill).attr('fill-opacity', finalOpacity);
       });
     });
 
-    // 边界重绘：沿用你原逻辑
+    // —— 边界重绘（保持你的原逻辑）—— //
     App.currentData?.subspaces?.forEach((space, i) => {
       const svg = App.subspaceSvgs[i];
       if (!svg || svg.empty()) return;
@@ -2118,6 +2159,7 @@ function hideColorMenu() {
       });
     });
   }
+
 
   // 仅取“一跳”邻居（不做整片扩展），返回 Set<"panelIdx|q,r">
   function starKeys(panelIdx, q, r) {
@@ -2446,6 +2488,26 @@ function hideColorMenu() {
     }
   }
 
+  function clearAltFocusForPanelOnNormalClick(panelIdx) {
+    let changed = false;
+
+    // 全局 Alt 聚焦关掉（不影响你已确认的颜色表）
+    if (App.focusCountryId) {
+      setCountryFocus(null, null);   // 会清 App.highlightedHexKeys
+      changed = true;
+    }
+
+    // 本面板若有本地聚焦也一并关掉
+    const local = App.panelFocusOverrides.get(panelIdx);
+    if (local && local.countryId) {
+      App.panelFocusOverrides.set(panelIdx, { countryId: null, mode: null });
+      changed = true;
+    }
+
+    if (changed) updateHexStyles();  // 让整国涂色立刻消失
+  }
+
+
 
   function handleSingleClick(panelIdx, q, r, withCtrl = false, withShift = false) {
     const k = pkey(panelIdx, q, r);
@@ -2496,6 +2558,9 @@ function hideColorMenu() {
       updateHexStyles(); // 关键：让边框与填充同步
       return;
     }
+
+    // —— 非 Alt：降级聚焦（filled → outline），保留边框
+    degradeFocusToOutlineFor(panelIdx);
 
     // —— Connect Active：插入模式优先（含“等待锚点”的绿灯）——————————————
     if (App.insertMode) {
@@ -3103,6 +3168,23 @@ function _deleteSubspaceByIndex(idx) {
   });
 }
 
+// 把当前主视图里“面板级国家颜色覆盖”整理成两张映射表：
+// - byPanel: { "panelIdx|countryId": "#RRGGBB", ... }（优先）
+// - byCountry: { countryId: "#RRGGBB", ... }（可留空/备用）
+function exportMiniColorMaps() {
+  const byPanel = {};   // 面板+国家 优先映射
+  App.panelCountryColors.forEach((countryMap, panelIdx) => {
+    countryMap.forEach((rec, countryIdRaw) => {
+      const cid = normalizeCountryId(countryIdRaw);
+      byPanel[`${panelIdx}|${cid}`] = rec?.color || '#FFFFFF';
+    });
+  });
+
+  // 如果你暂时没有“全局国家色”，可以先留空对象
+  const byCountry = {};
+  return { byPanel, byCountry };
+}
+
   /* =========================
    * 对外 API
    * ========================= */
@@ -3157,7 +3239,7 @@ function _deleteSubspaceByIndex(idx) {
 
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
-      // 当存在“整条线路选择”时，优先使用路线快照（会把被排除点跨过去，得到 A-C 这样的新边）
+      // （原逻辑不变）
       let snap;
       if (App.selectedRouteIds && App.selectedRouteIds.size > 0) {
         snap = snapshotFromSelectedRoutes();
@@ -3168,36 +3250,110 @@ function _deleteSubspaceByIndex(idx) {
         snap = snapshotFromKeySet(keySet || new Set());
       }
 
-      // 保持原有的 focusId 行为
       const focusId = App.selectedHex
         ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
         : null;
 
-      return { ...snap, meta: { focusId } };
-    },
+      // ★ 把颜色快照也放入 meta（关键改动）
+      const { colorByCountry, colorByPanelCountry } = _buildColorMapsSnapshot();
 
-        // ★ FIX: 通过坐标直接拿该格完整信息
-    getHexDetail(panelIdx, q, r) {
-      const hex = App.hexMapsByPanel?.[panelIdx]?.get(`${q},${r}`);
-      if (!hex) return null;
-      const msu_ids = Array.isArray(hex.msu_ids) ? hex.msu_ids : [];
-      const msu = resolveMSUs(msu_ids);
-      return {
-        panelIdx, q, r,
-        modality: hex.modality || '',
-        country_id: hex.country_id || null,
-        label: hex.label || `${q},${r}`,
-        msu_ids,
-        msu
+      return { 
+        ...snap, 
+        meta: { 
+          focusId, 
+          colorByCountry, 
+          colorByPanelCountry 
+        } 
       };
     },
 
-    // ★ FIX: 设置点击回调
-    setOnHexClick(fn) {
-      App.onHexClick = (typeof fn === 'function') ? fn : null;
+      // ★ FIX: 通过坐标直接拿该格完整信息
+      getHexDetail(panelIdx, q, r) {
+        const hex = App.hexMapsByPanel?.[panelIdx]?.get(`${q},${r}`);
+        if (!hex) return null;
+        const msu_ids = Array.isArray(hex.msu_ids) ? hex.msu_ids : [];
+        const msu = resolveMSUs(msu_ids);
+        return {
+          panelIdx, q, r,
+          modality: hex.modality || '',
+          country_id: hex.country_id || null,
+          label: hex.label || `${q},${r}`,
+          msu_ids,
+          msu
+        };
+      },
+
+      // ★ FIX: 设置点击回调
+      setOnHexClick(fn) {
+        App.onHexClick = (typeof fn === 'function') ? fn : null;
+      },
+
+      // ① 给右侧卡片或外部调用：取当前的颜色映射快照
+      getColorMaps() {
+        return _buildColorMapsSnapshot();
+      },
+
+      // ②（可选）暴露基础填充，做兜底
+      getBaseFillColors() {
+        return {
+          text:   App.config?.hex?.textFill   || '#DCDCDC',
+          image:  App.config?.hex?.imageFill  || '#DCDCDC',
+          def:    App.config?.background      || '#ffffff'
+        };
+      },
+
+
+    // 可选：把颜色映射直接塞进 getSelectionSnapshot 的返回里，方便一处拿齐
+    getSelectionSnapshot() {
+      // === 你原有的实现开始 ===
+      let snap;
+      if (App.selectedRouteIds && App.selectedRouteIds.size > 0) {
+        snap = snapshotFromSelectedRoutes();
+      } else {
+        const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
+          ? App.highlightedHexKeys
+          : App.persistentHexKeys;
+        snap = snapshotFromKeySet(keySet || new Set());
+      }
+      const focusId = App.selectedHex
+        ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
+        : null;
+      // === 你原有的实现结束 ===
+
+      // ★ 新增：把颜色映射带回去
+      const miniPalette = _buildMiniColorMaps();
+      return { ...snap, meta: { focusId, miniPalette } };
     },
 
+  // 在 return controller 之前，组装 controller 对象时加入：
+  getMiniColorMaps() {
+    // 面板+国家 -> 颜色
+    const colorByPanelCountry = {};
+    (App.panelCountryColors || new Map()).forEach((m, panelIdx) => {
+      (m || new Map()).forEach((rec, cid) => {
+        colorByPanelCountry[`${panelIdx}|${cid}`] = rec?.color || null;
+      });
+    });
 
+    // 全局国家 -> 颜色（聚合同一国家的第一条颜色即可）
+    const colorByCountry = {};
+    (App.panelCountryColors || new Map()).forEach((m) => {
+      (m || new Map()).forEach((rec, cid) => {
+        if (!(cid in colorByCountry)) colorByCountry[cid] = rec?.color || null;
+      });
+    });
+
+    // 提供与别名一致的归一化函数（小卡也用同一套）
+    const normalizeCountryId = (cid) => App.countryIdAlias.get(cid) || cid;
+
+    return { colorByCountry, colorByPanelCountry, normalizeCountryId };
+  },
+
+
+  // 可选：给小卡传“国家ID归一化”函数（如果你使用了别名）
+  getCountryIdNormalizer() {
+    return (cid) => App.countryIdAlias.get(cid) || cid;
+  },
 
   };
 

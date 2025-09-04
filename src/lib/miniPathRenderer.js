@@ -24,14 +24,38 @@ export function renderMiniPath(svgEl, link, nodes, opts = {}) {
     DX: opts.dx ?? 52,
     STROKE_W: opts.strokeWidth ?? 1.4,
     Y_ADJUST: opts.yAdjust ?? 0,
-    COLOR_TEXT: '#a9d08d',
-    COLOR_IMAGE: '#a6cee3',
-    COLOR_DEFAULT: '#ffffff',
+    COLOR_TEXT: opts.baseTextColor  ?? '#DCDCDC',
+    COLOR_IMAGE: opts.baseImageColor?? '#DCDCDC',
+    COLOR_DEFAULT: opts.baseDefault ?? '#ffffff',
     ROAD:   { stroke:'#e9c46b', width:(opts.strokeWidth ?? 1.4), dash:null,  opacity:0.95 },
     RIVER:  { stroke:'#8fbadf', width:(opts.strokeWidth ?? 1.4), dash:null,  opacity:0.95 },
     FLIGHT: { stroke:'#4a5f7e', width:(opts.strokeWidth ?? 1.4), dash:'4,4', opacity:0.95 },
   };
 
+   //  新增：从 opts 里拿映射（保存时传入）
+  const colorByCountry = opts.colorByCountry || null;
+  const colorByPanelCountry = opts.colorByPanelCountry || null;
+
+  const idOf = (p,q,r) => `${p}:${q},${r}`;
+  const normalize = (cid) => cid; // 若你有同名函数可直接用
+
+  const resolveNodeColor = (n) => {
+    if (n && n.country_id != null && Number.isInteger(n.panelIdx)) {
+      const key = `${n.panelIdx}|${normalize(n.country_id)}`;
+      if (colorByPanelCountry && (key in colorByPanelCountry)) {
+        return colorByPanelCountry[key];
+      }
+    }
+    if (n && n.country_id != null) {
+      const cid = normalize(n.country_id);
+      if (colorByCountry && (cid in colorByCountry)) {
+        return colorByCountry[cid];
+      }
+    }
+    if (n?.modality === 'text')  return STYLE.COLOR_TEXT;
+    if (n?.modality === 'image') return STYLE.COLOR_IMAGE;
+    return STYLE.COLOR_DEFAULT;
+  };
   const svg = d3.select(svgEl);
   svg.selectAll('*').remove();
 
@@ -41,12 +65,24 @@ export function renderMiniPath(svgEl, link, nodes, opts = {}) {
     return;
   }
 
-  const idOf = (p,q,r) => `${p}:${q},${r}`;
+  // ⭐ 修改：颜色解析（面板|国家 → 全局国家 → modality）
   const colorOfNode = (n) => {
-    if (n?.modality === 'text')  return STYLE.COLOR_TEXT;
-    if (n?.modality === 'image') return STYLE.COLOR_IMAGE;
+    if (!n) return STYLE.COLOR_DEFAULT;
+    const pid = Number.isInteger(n.panelIdx) ? n.panelIdx : null;
+    const cid = n.country_id ?? null;
+
+    if (pid != null && cid != null && colorByPanelCountry) {
+      const key = `${pid}|${cid}`;
+      if (key in colorByPanelCountry) return colorByPanelCountry[key];
+    }
+    if (cid != null && colorByCountry && (cid in colorByCountry)) {
+      return colorByCountry[cid];
+    }
+    if (n.modality === 'text')  return STYLE.COLOR_TEXT;
+    if (n.modality === 'image') return STYLE.COLOR_IMAGE;
     return STYLE.COLOR_DEFAULT;
   };
+
   const styleOfLink = (t) =>
     t === 'flight' ? STYLE.FLIGHT : (t === 'river' ? STYLE.RIVER : STYLE.ROAD);
 
@@ -88,7 +124,7 @@ export function renderMiniPath(svgEl, link, nodes, opts = {}) {
         .attr('transform', d => `translate(${d.x},${d.y})`);
       gg.append('path')
         .attr('d', hexD)
-        .attr('fill', d => colorOfNode(nodeMap.get(idOf(d.panelIdx,d.q,d.r))))
+        .attr('fill', d => resolveNodeColor(nodeMap.get(idOf(d.panelIdx,d.q,d.r))))
         .attr('stroke', '#ffffff')
         .attr('stroke-width', 1);
       return gg;
