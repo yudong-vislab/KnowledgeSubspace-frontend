@@ -1104,6 +1104,19 @@ export async function initSemanticMap({
     title.innerText = space.subspaceName || `Subspace ${i + 1}`;
     div.appendChild(title);
 
+    // ... 现有 addBtn 之后
+    const releaseBtn = document.createElement('button');
+    releaseBtn.className = 'subspace-release';
+    releaseBtn.textContent = '↺';                   // 或者 'R'
+    releaseBtn.title = 'Release selections in this subspace';
+    releaseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idxNow = Number(div.dataset.index ?? i);
+      releaseSubspaceSelections(idxNow);            // ← 调用下面的新函数
+    });
+    div.appendChild(releaseBtn);
+
+
     const addBtn = document.createElement('button');
     addBtn.className = 'subspace-add';
     addBtn.textContent = '+';
@@ -2737,6 +2750,51 @@ function observePanelResize() {
     }
     return out;
   }
+
+function releaseSubspaceSelections(panelIdx) {
+  // 1) 清掉本面板的节点选择/预览/排除
+  const dropKeysOfPanel = (set) => {
+    for (const k of Array.from(set)) {
+      const [p] = k.split('|');
+      if (+p === panelIdx) set.delete(k);
+    }
+  };
+  dropKeysOfPanel(App.persistentHexKeys);
+  dropKeysOfPanel(App.highlightedHexKeys);
+  dropKeysOfPanel(App.excludedHexKeys);
+
+  // 如果当前“悬停点/起点/临时目标”在本面板，也一并清理
+  if (App.hoveredHex?.panelIdx === panelIdx) App.hoveredHex = null;
+  if (App.flightStart?.panelIdx === panelIdx) App.flightStart = null;
+  if (App.flightHoverTarget?.panelIdx === panelIdx) App.flightHoverTarget = null;
+  if (App.selectedHex?.panelIdx === panelIdx) App.selectedHex = null;
+
+  // 2) 若存在“整条线路选择”，把这条线路中属于本面板的点全部标记为排除，
+  //    这样路线仍可在其它面板高亮，但本面板将“回到未选择态”
+  (App._lastLinks || []).forEach(link => {
+    if (!isSelectableRoute(link)) return;
+    const lk = linkKey(link);
+    if (!App.selectedRouteIds.has(lk)) return;          // 只处理被选中的线路
+    const path = Array.isArray(link.path) ? link.path : [];
+    for (let i = 0; i < path.length; i++) {
+      const pIdx = resolvePanelIdxForPathPoint(path[i], link, i);
+      if (pIdx === panelIdx) {
+        App.excludedHexKeys.add(`${panelIdx}|${path[i].q},${path[i].r}`);
+      }
+    }
+  });
+
+  // 3) 清掉本面板的 Alt 聚焦（不影响其它面板，也不影响全局）
+  //    这样“release”后就不会继续因为全局 focusCountryId 而显示边框/底色
+  App.panelFocusOverrides.set(panelIdx, { countryId: null, mode: null });
+
+  // 4) 重绘
+  recomputePersistentFromRoutes();  // 用“选中线路-排除点”重算一次持久集
+  drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+  updateHexStyles();
+  publishToStepAnalysis();
+}
+
 
 function _duplicateSubspaceByIndex(srcIdx) {
   if (!App.currentData?.subspaces?.[srcIdx]) return;
