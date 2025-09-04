@@ -16,7 +16,7 @@ const STYLE = {
   OPACITY_HOVER: 1.0,
   OPACITY_SELECTED: 1.0,
   OPACITY_NEIGHBOR: 0.6,
-  OPACITY_PREVIEW: 0.8,      // 预览（待选）态透明度
+  OPACITY_PREVIEW: 0.5,      // 预览（待选）态透明度
   HATCH_ID: 'preview-hatch', // 预览斜线填充的 <pattern> id
 
   // --- ALT（国家预览）态 ---
@@ -118,6 +118,7 @@ export async function initSemanticMap({
       hex: {
         radius: STYLE.HEX_RADIUS,
         fillOpacity: STYLE.OPACITY_DEFAULT,
+        altOtherOpacity: STYLE.OPACITY_ALT_OTHER,
         borderWidth: STYLE.HEX_BORDER_WIDTH,
         borderColor: STYLE.HEX_BORDER_COLOR,
         textFill: STYLE.HEX_FILL_TEXT,
@@ -201,6 +202,12 @@ export async function initSemanticMap({
     currentData: null,
     countryKeysGlobal: new Map(),   // ★ 新增：全局 { country_id -> Set("panel|q,r") }
     focusCountryId: null,   // ★ 当前 Alt 高亮的国家（跨面板生效）
+    focusMode: 'filled',      // ★ 新增：'filled' | 'outline'
+
+    // —— Alt 聚焦隔离 & 面板级聚焦覆盖 —— //
+    altIsolatedPanels: new Set(),     // 被隔离 Alt 聚焦的面板索引集合（复制面板会加入）
+    panelFocusOverrides: new Map(),   // panelIdx -> { countryId, mode: 'filled'|'outline' }
+
 
   };
 
@@ -247,28 +254,40 @@ export async function initSemanticMap({
     return out;
   }
 
-  function setCountryFocus(countryId) {
-    const normId = countryId ? normalizeCountryId(countryId) : null;
-    App.focusCountryId = normId;
+  // 面板级聚焦：只影响一个面板
+  function setCountryFocusLocal(panelIdx, countryId, mode = 'filled') {
+    const cid = countryId ? normalizeCountryId(countryId) : null;
+    if (!cid) App.panelFocusOverrides.delete(panelIdx);
+    else App.panelFocusOverrides.set(panelIdx, { countryId: cid, mode });
 
-    // 1) 高亮所有该国家的 hex（跨子空间，已做归一化）
-    if (normId) {
-      App.highlightedHexKeys = getCountryKeysAllPanels(normId);
-    } else {
-      App.highlightedHexKeys.clear();
+    // 仅该面板立即重画边界（也可交给 updateHexStyles 统一处理）
+    const space = App.currentData?.subspaces?.[panelIdx];
+    const svg   = App.subspaceSvgs[panelIdx];
+    if (space && svg) {
+      drawCountries(space, svg, App.config.hex.radius, { focusCountryId: cid, focusMode: mode });
     }
-
-    // 2) 让所有 panel 的国家边界按“聚焦国家”重画
-    (App.currentData?.subspaces || []).forEach((space, i) => {
-      const svg = App.subspaceSvgs[i];
-      drawCountries(space, svg, App.config.hex.radius, { focusCountryId: App.focusCountryId });
-    });
-
-    // 3) 刷新样式
     updateHexStyles();
   }
 
+  // 取“有效聚焦”：优先本面板覆盖，其次全局；都没有时为 null
+  function getEffectivePanelFocus(panelIdx) {
+    const local = App.panelFocusOverrides.get(panelIdx);
+    if (local && local.countryId) return { countryId: normalizeCountryId(local.countryId), mode: local.mode || 'filled' };
+    if (App.focusCountryId)       return { countryId: normalizeCountryId(App.focusCountryId), mode: App.focusMode || 'filled' };
+    return { countryId: null, mode: null };
+  }
 
+
+
+  function setCountryFocus(countryId, mode = 'filled') {
+    const normId = countryId ? normalizeCountryId(countryId) : null;
+    App.focusCountryId = normId;
+    App.focusMode = normId ? mode : null;
+    // 预览集合可不强依赖（保持或清空均可）
+    if (normId && mode === 'filled') App.highlightedHexKeys = getCountryKeysAllPanels(normId);
+    else App.highlightedHexKeys.clear();
+    updateHexStyles();
+  }
 
 
   // ★ FIX: 访问全量 msu_index 并解析
@@ -595,12 +614,19 @@ export async function initSemanticMap({
   }
 
   function computeHoverOrCountryPreview(panelIdx, q, r, { withCtrl=false, withShift=false, withAlt=false } = {}) {
-    if (withAlt && !App.focusCountryId) {
+    if (withAlt) {
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
       const cid = hex?.country_id ? normalizeCountryId(hex.country_id) : null;
-      return cid ? getCountryKeysAllPanels(cid) : new Set();
+      if (!cid) return new Set();
+
+      // 复制面板：只在本面板预览
+      if (App.altIsolatedPanels.has(panelIdx)) {
+        return getCountryKeysInPanel(panelIdx, cid);
+      }
+      // 其它面板：保持原逻辑，跨面板
+      return getCountryKeysAllPanels(cid);
     }
-    // 非 Alt：保持原逻辑
+
     return ModeUI.computeHoverPreview(panelIdx, q, r, { withCtrl, withShift });
   }
 
@@ -1078,6 +1104,17 @@ export async function initSemanticMap({
     title.innerText = space.subspaceName || `Subspace ${i + 1}`;
     div.appendChild(title);
 
+    const addBtn = document.createElement('button');
+    addBtn.className = 'subspace-add';
+    addBtn.textContent = '+';
+    addBtn.title = 'Duplicate Subspace';
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idxNow = Number(div.dataset.index ?? i);
+      _duplicateSubspaceByIndex(idxNow);
+    });
+    div.appendChild(addBtn);
+
     const closeBtn = document.createElement('button');
     closeBtn.className = 'subspace-close';
     closeBtn.textContent = '×';
@@ -1215,8 +1252,12 @@ export async function initSemanticMap({
         .attr('class', 'bg-capture')
         .attr('x', 0).attr('y', 0)
         .attr('fill', 'transparent')
-        .on('click', () => {
-          // 复用清理逻辑：清空所有预览/选集/排除，并回到 Group
+        .on('click', (evt) => {
+          // Alt + 空白：只清国家聚焦（其他逻辑照旧）
+          if (evt && evt.altKey) {
+            setCountryFocus(null, null);
+          }
+
           App.selectedHex = null;
           App.neighborKeySet.clear();
           App.selectedRouteIds.clear();
@@ -1228,8 +1269,6 @@ export async function initSemanticMap({
           App.hoveredHex = null;
           updateHexStyles();
           publishToStepAnalysis();
-
-          // 切回 Group（绿灯），并刷新模式 UI/预览
           ModeUI.forceGroupDefault();
         });
     }
@@ -1276,8 +1315,8 @@ export async function initSemanticMap({
     // 初始/持久化变换
     const savedZoom = App.panelStates[panelIdx]?.zoom;
     const defaultTransform = d3.zoomIdentity
-      .translate((width / 2) - centerX, (height / 2) - centerY)
-      .scale(1);
+      .translate((width / 2) - centerX, (height / 2) - centerY/2)
+      .scale(0.6);
 
     let lastTransform =
       savedZoom && isFiniteTransform(savedZoom)
@@ -1333,33 +1372,27 @@ export async function initSemanticMap({
             .style('pointer-events', 'none');     // 阴影不截获事件
 
           g.on('mouseover', (event, d) => {
-            // 若已经处于“国家聚焦”锁定，悬停不再改写高亮集合
-            if (App.focusCountryId) return;
+            // // 若已经处于“国家聚焦”锁定，悬停不再改写高亮集合
             App.hoveredHex = { panelIdx, q: d.q, r: d.r };
             if (App.flightStart) App.flightHoverTarget = { panelIdx, q: d.q, r: d.r };
-            // ★ 根据当前键位/按钮状态计算预览
+
             const withCtrl  = isCtrlLike(event);
             const withShift = !!event.shiftKey;
-            const withAlt   = !!event.altKey;  
-            App.highlightedHexKeys = computeHoverOrCountryPreview(panelIdx, d.q, d.r, { withCtrl, withShift, withAlt });
-  
+            const withAlt   = !!event.altKey;
+
+            App.highlightedHexKeys = computeHoverOrCountryPreview(
+              panelIdx, d.q, d.r,
+              { withCtrl, withShift, withAlt }
+            );
             updateHexStyles();
           })
           .on('mouseout', (event, d) => {
             if (App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r) {
               App.hoveredHex = null;
             }
-            // if (App.flightStart &&
-            //     App.flightHoverTarget?.panelIdx === panelIdx &&
-            //     App.flightHoverTarget.q === d.q &&
-            //     App.flightHoverTarget.r === d.r) {
-            //   App.flightHoverTarget = null;
-            // }
-            // 锁定聚焦时，不清理；仅在“未锁定”预览态下才清理
-            if (!App.focusCountryId) {
-              App.highlightedHexKeys.clear();
-              updateHexStyles();
-            }
+            // 无论是否有国家聚焦，都清理预览集合
+            App.highlightedHexKeys.clear();
+            updateHexStyles();
           })
           
           .on('click', (event, d) => {
@@ -1419,7 +1452,8 @@ export async function initSemanticMap({
   }
 
   function drawCountries(space, svg, hexRadius, opts = {}) {
-    const focusId = opts.focusCountryId || null;
+    const focusId  = opts.focusCountryId || null;
+    const focusMode= opts.focusMode || null; // 'filled'|'outline'|null
     const container = svg.select('g');
     container.selectAll('.country-border').remove();
 
@@ -1455,7 +1489,7 @@ export async function initSemanticMap({
     };
 
     // 3) 两类边：otherEdges（很浅） 与 focusEdges（正常）
-    const focusCid = App.focusCountryId || null;
+    const focusCid = focusId; 
     const otherEdges = new Map(); // key -> {a,b,dashed}
     const focusEdges = new Map();
 
@@ -1507,22 +1541,27 @@ export async function initSemanticMap({
       }
     });
 
-    // 4) 绘制：先 other（淡），再 focus（盖上）
-    // other 很浅
+    // 4) 绘制
+    // other：outline 模式下，其他边界完全隐藏；filled / 无聚焦则按原逻辑
     otherEdges.forEach(({a,b,dashed}) => {
+      const show = focusId
+        ? (focusMode === 'filled' ? true : false) // outline 不画 other
+        : true;
+      if (!show) return;
+
       container.append('line')
         .attr('class', 'country-border country-border-other')
         .attr('x1', a[0]).attr('y1', a[1])
         .attr('x2', b[0]).attr('y2', b[1])
         .attr('stroke', App.config.countryBorder.color)
         .attr('stroke-width', App.config.countryBorder.width)
-        .attr('stroke-opacity', focusCid ? STYLE.BORDER_ALT_OTHER : 1)   // ★ Alt 时变浅；否则保持原来 1
+        .attr('stroke-opacity', focusId ? STYLE.BORDER_ALT_OTHER : 1)
         .attr('stroke-dasharray', dashed ? '6,4' : null)
         .attr('pointer-events', 'none');
     });
 
-    // focus 正常（Alt 时只画这个集合的“外边”）
-    if (focusCid) {
+    // focus：outline/filled 都画，但在 outline 下更突出
+    if (focusId) {
       focusEdges.forEach(({a,b,dashed}) => {
         container.append('line')
           .attr('class', 'country-border country-border-focus')
@@ -1530,7 +1569,7 @@ export async function initSemanticMap({
           .attr('x2', b[0]).attr('y2', b[1])
           .attr('stroke', App.config.countryBorder.color)
           .attr('stroke-width', App.config.countryBorder.width)
-          .attr('stroke-opacity', 1)
+          .attr('stroke-opacity', 1) // 聚焦边界始终清晰
           .attr('stroke-dasharray', dashed ? '6,4' : null)
           .attr('pointer-events', 'none');
       });
@@ -1755,100 +1794,85 @@ export async function initSemanticMap({
   }
 
   function updateHexStyles() {
-    const inAltFocus = !!(App.modKeys.alt && App.focusCountryId);
-    const focusCid = inAltFocus ? App.focusCountryId : null;
-
-    // ★ Alt 模式下“同一坐标只显示一次”，避免重复叠加变深
-    const seenInAlt = new Set(); // key: `${panelIdx}|${q},${r}`
-
+    // —— 每个面板独立计算有效聚焦 —— //
     App.subspaceSvgs.forEach((svg, panelIdx) => {
+      const override = App.panelFocusOverrides.get(panelIdx);
+      const focusCid  = override && override.countryId ? normalizeCountryId(override.countryId)
+                                                      : (App.focusCountryId ? normalizeCountryId(App.focusCountryId) : null);
+      const focusMode = override && override.mode ? override.mode : (App.focusMode || null);
+
       svg.selectAll('g.hex').each(function(d) {
-        const gSel = d3.select(this);
-        const path = gSel.select('path');               // 底色
-        const hatch = gSel.select('path.hex-hatch');    // 斜线
-        const key = `${panelIdx}|${d.q},${d.r}`;
+        const gSel  = d3.select(this);
+        const path  = gSel.select('path');
+        const hatch = gSel.select('path.hex-hatch');
+        const key   = `${panelIdx}|${d.q},${d.r}`;
         const baseFill = getHexFillColor(d);
 
-        let opacity = STYLE.OPACITY_DEFAULT;
-        let needHatch = false;
+        // —— 面板级聚焦底层 —— //
+        const thisCid = d.country_id ? normalizeCountryId(d.country_id) : null;
+        const isFocusHex = !!(focusCid && thisCid === focusCid);
 
-        const inHighlight = App.highlightedHexKeys.has(key);
-        const isFocusMode = !!App.focusCountryId;
-
-        // ★★★ Alt 聚焦国家：统一上色 & 压暗其余
-        if (isFocusMode) {
-          // 简单去重：同一个 panel|q,r 只显示一次
-          if (inHighlight) {
-            if (seenInAlt.has(key)) {
-              path.attr('fill-opacity', 0); // 隐藏重复层
-              hatch.attr('fill', 'none');
-              return;
-            }
-            seenInAlt.add(key);
-          }
-          // 填充色：仅聚焦国家统一色，其余走默认底色
-          const fillColor = inHighlight ? STYLE.FOCUS_COUNTRY_FILL : getHexFillColor(d);
-          path.attr('fill', fillColor);
-
-          // 透明度：聚焦国全亮，其余压暗（避免视觉噪声）
-          const op = inHighlight ? STYLE.OPACITY_SELECTED : STYLE.OPACITY_NONFOCUS;
-          path.attr('fill-opacity', op);
-
-          // 聚焦时不再显示预览阴影
-          hatch.attr('fill', 'none');
-          return; // ★ 聚焦态已处理完，后面的普通逻辑不再执行
+        let focusBaseFill    = baseFill;
+        let focusBaseOpacity = STYLE.OPACITY_DEFAULT;
+        if (focusCid && focusMode === 'filled') {
+          focusBaseFill    = isFocusHex ? STYLE.FOCUS_COUNTRY_FILL : baseFill;
+          focusBaseOpacity = isFocusHex ? STYLE.OPACITY_SELECTED   : STYLE.OPACITY_NONFOCUS;
         }
 
-        if (inAltFocus) {
-          // ① Alt 高亮：非本国家 → 很浅
-          if (d.country_id !== focusCid) {
-            opacity = 0.08;           // ★ 你想要的“其他都很浅”
-            needHatch = false;
-          } else {
-            // ② 本国家：只保留第一份（避免堆叠加深）
-            if (seenInAlt.has(key)) {
-              opacity = 0;            // 隐藏重复份
-            } else {
-              seenInAlt.add(key);
-              opacity = 0.95;         // ★ 高亮深度（可调）
-            }
-            needHatch = false;
-          }
-        } else {
-          // 原先非 Alt 的层级逻辑（保持你的 hover/selected/preview 规则）
-          const isSelected    = App.persistentHexKeys.has(key);
-          const isHovered     = App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r;
-          const isFlightStart = App.flightStart?.panelIdx === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r;
-          const isFlightHover = App.flightHoverTarget?.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r;
-          const isPreview     = App.highlightedHexKeys.has(key);
-          const isPreviewCenter =
-            isPreview && (App.hoveredHex?.panelIdx === panelIdx) &&
-            (App.hoveredHex.q === d.q) && (App.hoveredHex.r === d.r);
-          const isPreviewNeighbor = isPreview && !isPreviewCenter;
+        // —— 原交互层叠加（保持不变） —— //
+        const isSelected  = App.persistentHexKeys.has(key);
+        const isHovered   = !!(App.hoveredHex &&
+                              App.hoveredHex.panelIdx === panelIdx &&
+                              App.hoveredHex.q === d.q &&
+                              App.hoveredHex.r === d.r);
+        const isFlightStart = !!(App.flightStart &&
+                                App.flightStart.panelIdx === panelIdx &&
+                                App.flightStart.q === d.q &&
+                                App.flightStart.r === d.r);
+        const isFlightHover = !!(App.flightHoverTarget &&
+                                App.flightHoverTarget.panelIdx === panelIdx &&
+                                App.flightHoverTarget.q === d.q &&
+                                App.flightHoverTarget.r === d.r);
 
-          if (isSelected)        opacity = STYLE.OPACITY_SELECTED;
-          else if (isHovered || isFlightStart || isFlightHover) opacity = STYLE.OPACITY_HOVER;
-          else if (isPreviewCenter)   opacity = STYLE.OPACITY_PREVIEW_CENTER;
-          else if (isPreviewNeighbor) { opacity = STYLE.OPACITY_PREVIEW_NEIGHBOR; needHatch = true; }
-          else                   opacity = STYLE.OPACITY_DEFAULT;
-        }
+        const inPreview         = App.highlightedHexKeys.has(key);
+        const isPreviewCenter   = inPreview && isHovered;
+        const isPreviewNeighbor = inPreview && !isPreviewCenter;
 
-        // 应用
+        let overlayOpacity = STYLE.OPACITY_DEFAULT;
+        if (isSelected)              overlayOpacity = STYLE.OPACITY_SELECTED;
+        else if (isHovered || isFlightStart || isFlightHover)
+                                    overlayOpacity = STYLE.OPACITY_HOVER;
+        else if (isPreviewCenter)    overlayOpacity = STYLE.OPACITY_PREVIEW_CENTER;
+        else if (isPreviewNeighbor)  overlayOpacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;
+
+        const finalOpacity = (focusCid && focusMode === 'filled')
+          ? Math.max(focusBaseOpacity, overlayOpacity)
+          : overlayOpacity;
+
+        const finalFill = (focusCid && focusMode === 'filled') ? focusBaseFill : baseFill;
+        const needHatch = isPreviewNeighbor;
+
         hatch.attr('fill', needHatch ? `url(#hex-hatch-${panelIdx})` : 'none');
-        path.attr('fill', baseFill).attr('fill-opacity', opacity);
+        path .attr('fill', finalFill).attr('fill-opacity', finalOpacity);
       });
     });
 
-    // ★ Alt 焦点边界重绘（所有面板）
+    // —— 边界重绘：按每个面板的“有效聚焦”分别绘制 —— //
     App.currentData?.subspaces?.forEach((space, i) => {
       const svg = App.subspaceSvgs[i];
-      if (svg && !svg.empty()) {
-        drawCountries(space, svg, App.config.hex.radius); // 会读 App.focusCountryId
-      }
-    });
-    
-  }
+      if (!svg || svg.empty()) return;
 
+      const override = App.panelFocusOverrides.get(i);
+      const focusCid  = override && override.countryId ? normalizeCountryId(override.countryId)
+                                                      : (App.focusCountryId ? normalizeCountryId(App.focusCountryId) : null);
+      const focusMode = override && override.mode ? override.mode : (App.focusMode || null);
+
+      drawCountries(space, svg, App.config.hex.radius, {
+        focusCountryId: focusCid,
+        focusMode: focusMode
+      });
+    });
+  }
 
   // 仅取“一跳”邻居（不做整片扩展），返回 Set<"panelIdx|q,r">
   function starKeys(panelIdx, q, r) {
@@ -2184,13 +2208,48 @@ export async function initSemanticMap({
     const armed = isConnectArmedNow(withCtrl, withShift); // 键盘(Ctrl+Shift) 或 按钮黄灯
     const routeMode = isRouteMode(ctrlLike);              // 键盘(Ctrl/⌘) 或 按钮 Route 绿灯
 
-    // ★★★ Alt 锁定国家聚焦（跨子空间）—— 优先处理
+    // ★★★ Alt：国家聚焦/切换
+    // ★ Alt：国家聚焦（支持面板隔离）
     if (App.modKeys.alt) {
       const hex = App.hexMapsByPanel[panelIdx]?.get(`${q},${r}`);
       const raw = hex?.country_id || null;
-      const cid = raw ? normalizeCountryId(raw) : null;
-      setCountryFocus(cid);
-      return; // Alt 点击只做国家聚焦
+      const isolated = App.altIsolatedPanels.has(panelIdx); // ← 是否隔离面板
+
+      if (!raw) {
+        // 点在无国家处：清聚焦
+        if (isolated) {
+          App.panelFocusOverrides.set(panelIdx, { countryId: null, mode: null });
+        } else {
+          setCountryFocus(null, null); // 你已有的全局函数
+        }
+        updateHexStyles();
+        return;
+      }
+
+      const cid = normalizeCountryId(raw);
+
+      if (isolated) {
+        // ★ 面板级：只切换当前面板的 focus
+        const cur = App.panelFocusOverrides.get(panelIdx);
+        if (!cur || cur.countryId !== cid) {
+          App.panelFocusOverrides.set(panelIdx, { countryId: cid, mode: 'filled' });
+        } else {
+          const next = (cur.mode === 'filled') ? 'outline' : 'filled';
+          App.panelFocusOverrides.set(panelIdx, { countryId: cid, mode: next });
+        }
+      } else {
+        // 原行为：全局联动
+        if (!App.focusCountryId) {
+          setCountryFocus(cid, 'filled');
+        } else if (App.focusCountryId === cid) {
+          setCountryFocus(cid, App.focusMode === 'filled' ? 'outline' : 'filled');
+        } else {
+          setCountryFocus(cid, 'filled');
+        }
+      }
+
+      updateHexStyles(); // 关键：让边框与填充同步
+      return;
     }
 
     // —— Connect Active：插入模式优先（含“等待锚点”的绿灯）——————————————
@@ -2271,41 +2330,51 @@ export async function initSemanticMap({
 
     // —— Route 模式（键盘 Ctrl/⌘ 或 按钮 Route 绿灯）———————————————
     if (routeMode) {
-      // 与你原来的 Ctrl 分支一致（仅去掉对 withCtrl 的强制）
       const key = pkey(panelIdx, q, r);
+      let needsRecompute = false;  // 只有涉及“整条线路”时才重算
 
       if (App.persistentHexKeys.has(key)) {
-        // 已在选集中：只排除此点
+        // 已选 → 标记为排除（仅当存在路线选择时才需要重算）
         App.excludedHexKeys.add(key);
         App.persistentHexKeys.delete(key);
+        needsRecompute = (App.selectedRouteIds.size > 0);
       } else {
-        let added = false;
+        let addedRoute = false;
 
-        // 规则一：若该点是某条线的起点，选所有以它为起点的线
+        // 规则一：优先选“以该点为起点”的所有线路
         (App._lastLinks || []).forEach(link => {
           if (!isSelectableRoute(link)) return;
           if (isStartOfLink(link, panelIdx, q, r)) {
             App.selectedRouteIds.add(linkKey(link));
-            added = true;
+            addedRoute = true;
           }
         });
 
-        // 规则二：否则，选中所有“包含此点”的线路
-        if (!added) {
+        // 规则二：否则，选中所有“包含该点”的线路
+        if (!addedRoute) {
           (App._lastLinks || []).forEach(link => {
             if (!isSelectableRoute(link)) return;
             if (linkContainsNode(link, panelIdx, q, r)) {
               App.selectedRouteIds.add(linkKey(link));
-              added = true;
+              addedRoute = true;
             }
           });
         }
 
-        // 这次把该点加入选集（若之前被排除则撤销排除）
+        // 规则三（兜底）：如果数据里根本没有命中任何线路，至少选中“当前点”
         App.excludedHexKeys.delete(key);
+        if (addedRoute) {
+          needsRecompute = true;
+        } else {
+          // 兜底直接落到节点集合，不重算（避免被清空）
+          App.persistentHexKeys.add(key);
+        }
       }
 
-      recomputePersistentFromRoutes();
+      if (needsRecompute) {
+        recomputePersistentFromRoutes();
+      }
+
       App.selectedHex = { panelIdx, q, r };
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
       App.highlightedHexKeys.clear();
@@ -2574,6 +2643,8 @@ function observePanelResize() {
 
       drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
       App.highlightedHexKeys.clear();
+      App.panelFocusOverrides.clear();   // 如果不想清，删掉这行
+
       App.hoveredHex = null;  
       updateHexStyles();
       publishToStepAnalysis();
@@ -2667,6 +2738,36 @@ function observePanelResize() {
     return out;
   }
 
+function _duplicateSubspaceByIndex(srcIdx) {
+  if (!App.currentData?.subspaces?.[srcIdx]) return;
+  const src = App.currentData.subspaces[srcIdx];
+
+  // 1) 深拷贝整个子空间（包含 hexList & countries）
+  const cloned = JSON.parse(JSON.stringify(src));
+
+  // ★ 在标题后追加 Copy
+  cloned.subspaceName = (src.subspaceName || `Subspace${srcIdx}`) + ' Copy';
+
+  // 2) 挂到数据上
+  const newIndex = App.currentData.subspaces.length;
+  App.currentData.subspaces.push(cloned);
+
+  // 3) 渲染这个新面板
+  createSubspaceElement(cloned, newIndex);
+  renderHexGridFromData(newIndex, cloned, App.config.hex.radius);
+
+  // ★ 新增：复制出来的面板 Alt 只影响自己
+  App.altIsolatedPanels.add(newIndex);
+  // ★ 新增：给该面板准备本地聚焦容器
+  App.panelFocusOverrides.set(newIndex, { countryId: null, mode: null });
+
+  // 4) 正常刷新
+  drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, !!App.flightStart);
+  updateHexStyles();
+  observePanelResize();
+  applyResponsiveLayout(true);
+}
+
 function _deleteSubspaceByIndex(idx) {
   if (!App.currentData || !Array.isArray(App.currentData.subspaces)) return;
   if (idx < 0 || idx >= App.currentData.subspaces.length) return;
@@ -2748,6 +2849,9 @@ function _deleteSubspaceByIndex(idx) {
     },
     deleteSubspace(idx) {
       _deleteSubspaceByIndex(idx);
+    },
+    duplicateSubspace(idx) { 
+      _duplicateSubspaceByIndex(idx); 
     },
     setOnMainTitleRename(fn) {
       App.onMainTitleRename = typeof fn === 'function' ? fn : null;

@@ -278,6 +278,33 @@ body,
   color: #fff;
 }
 
+/* 子空间右上角新增按钮（加号）——hover 不变色 */
+.subspace-add {
+  position: absolute;
+  top: 6px;
+  right: 32px;          /* 放在关闭按钮左侧（关闭是 right:8px） */
+  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 5px 0 2px 0;
+  width: 18px;
+  height: 18px;
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+  z-index: 30;
+  color: #333;
+}
+
+/* 保持 hover 不变色（与 close 区分开） */
+.subspace-add:hover {
+  background: #e9c46b;
+  color: #333;
+}
+
+
 /* 自动隐藏滚动条（悬停或滚动时再显） */
 .scroll-auto-hide {
   /* 预留滚动槽，避免有/无滚动条时内容抖动 */
