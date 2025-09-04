@@ -8,8 +8,10 @@ const STYLE = {
   HEX_RADIUS: 16,
   HEX_BORDER_WIDTH: 1.2,
   HEX_BORDER_COLOR: '#ffffff',
-  HEX_FILL_TEXT: '#a9d08d',
-  HEX_FILL_IMAGE: '#a6cee3',
+  // HEX_FILL_TEXT: '#a9d08d',
+  // HEX_FILL_IMAGE: '#a6cee3',
+  HEX_FILL_TEXT: '#DCDCDC',
+  HEX_FILL_IMAGE: '#DCDCDC',
   HEX_FILL_DEFAULT: '#ffffff',
 
   OPACITY_DEFAULT: 0.2,
@@ -75,7 +77,7 @@ const STYLE = {
   HATCH_OPACITY: 0.6,            // 斜线透明度
   HATCH_ANGLE: 45,                // 斜线角度（度）
 
-  FOCUS_COUNTRY_FILL: '#a9d08d',   // Alt 聚焦国家的统一填充色（不区分 modality）
+  FOCUS_COUNTRY_FILL: '#FCFCFC',   // Alt 聚焦国家的统一填充色（不区分 modality）
   OPACITY_NONFOCUS: 0.08,          // Alt 聚焦时，非该国家 hex 的压暗透明度
 
 
@@ -277,7 +279,14 @@ export async function initSemanticMap({
     return { countryId: null, mode: null };
   }
 
-
+  // —— 简易防抖 —— //
+  function debounce(fn, wait = 240) {
+    let t = null;
+    return (...args) => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => { t = null; fn(...args); }, wait);
+    };
+  }
 
   function setCountryFocus(countryId, mode = 'filled') {
     const normId = countryId ? normalizeCountryId(countryId) : null;
@@ -467,6 +476,175 @@ export async function initSemanticMap({
     }
     return added;
   }
+
+
+  /* =========================
+ * Alt 改色：状态与工具
+ * ========================= */
+
+// 面板级颜色覆盖：panelIdx -> (countryId -> { color: '#RRGGBB', alphaByKey: Map<'p|q,r', number> })
+App.panelCountryColors = new Map();
+
+// 临时预览态（打开菜单时用）
+App._pendingColorEdit = null; 
+// { panelIdx, countryId, color, keys:Set<"p|q,r">, alphaByKey:Map }
+
+function getCountryColorOverride(panelIdx, countryId) {
+  const m = App.panelCountryColors.get(panelIdx);
+  return m ? m.get(normalizeCountryId(countryId)) : null;
+}
+function setCountryColorOverride(panelIdx, countryId, color, alphaByKey) {
+  const cid = normalizeCountryId(countryId);
+  if (!App.panelCountryColors.has(panelIdx)) App.panelCountryColors.set(panelIdx, new Map());
+  App.panelCountryColors.get(panelIdx).set(cid, { color, alphaByKey });
+}
+function clearCountryColorOverride(panelIdx, countryId) {
+  const m = App.panelCountryColors.get(panelIdx);
+  if (m) m.delete(normalizeCountryId(countryId));
+}
+
+// 依据“该面板 + 国家”的实际 hex 集合，生成一条透明度比例尺（层次感）
+// 策略：按 y 再按 x 排序，做一个从 0.65 → 1.0 的线性渐变
+function buildAlphaRampFor(panelIdx, countryId) {
+  const cid = normalizeCountryId(countryId);
+  const keys = getCountryKeysInPanel(panelIdx, cid); // Set<"p|q,r">
+  const arr = Array.from(keys).map(k => {
+    const [pStr, qr] = k.split('|');
+    const [qs, rs] = qr.split(',');
+    const p = +pStr, q = +qs, r = +rs;
+    const hex = App.hexMapsByPanel[p]?.get(`${q},${r}`);
+    return { k, x: hex?.x ?? 0, y: hex?.y ?? 0 };
+  });
+  arr.sort((a,b) => (a.y - b.y) || (a.x - b.x));
+  const n = Math.max(1, arr.length);
+  const a0 = 0.65, a1 = 1.0;
+  const alphaByKey = new Map();
+  arr.forEach((it, i) => {
+    const t = n === 1 ? 1 : i / (n - 1);
+    const alpha = a0 + (a1 - a0) * t;
+    alphaByKey.set(it.k, alpha);
+  });
+  return { keys: new Set(arr.map(d => d.k)), alphaByKey };
+}
+
+/* =========================
+ * 右键菜单（全局唯一）
+ * ========================= */
+function ensureColorMenu() {
+  let menu = document.getElementById('alt-color-menu');
+  if (menu) return menu;
+
+  menu = document.createElement('div');
+  menu.id = 'alt-color-menu';
+  Object.assign(menu.style, {
+    position: 'fixed',
+    display: 'none',
+    zIndex: 9999,
+    minWidth: '220px',
+    padding: '10px 12px',
+    borderRadius: '12px',
+    background: 'rgba(30,30,32,0.98)',
+    color: '#fff',
+    boxShadow: '0 8px 18px rgba(0,0,0,0.25)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    backdropFilter: 'blur(6px)',
+  });
+  menu.innerHTML = `
+    <div style="font-size:13px;opacity:.85;margin-bottom:8px">Adjust country color</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <input id="alt-color-input" type="color" style="width:36px;height:28px;border:none;background:transparent;cursor:pointer" />
+      <input id="alt-color-hex" type="text" placeholder="#AABBCC" style="flex:1;height:28px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#fff;padding:0 8px;font-size:12px;outline:none" />
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button id="alt-color-cancel" style="height:28px;padding:0 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:transparent;color:#fff;cursor:pointer">Cancel</button>
+      <button id="alt-color-confirm" style="height:28px;padding:0 12px;border-radius:8px;border:none;background:#3b82f6;color:#fff;cursor:pointer">Confirm</button>
+    </div>
+  `;
+  document.body.appendChild(menu);
+
+  const pick = () => {
+    const inp = /** @type {HTMLInputElement} */(menu.querySelector('#alt-color-input'));
+    const hex = /** @type {HTMLInputElement} */(menu.querySelector('#alt-color-hex'));
+    return { inp, hex };
+  };
+
+  // 同步：色盘 <-> 文本
+  menu.querySelector('#alt-color-input').addEventListener('input', () => {
+    const { inp, hex } = pick();
+    hex.value = inp.value.toUpperCase();
+    // 预览
+    if (App._pendingColorEdit) {
+      App._pendingColorEdit.color = inp.value;
+      debouncedPreview();          // ← 用防抖替代即时预览
+    }
+  });
+  menu.querySelector('#alt-color-hex').addEventListener('input', () => {
+    const { inp, hex } = pick();
+    const v = hex.value.trim();
+    if (/^#([0-9a-f]{6})$/i.test(v)) {
+      inp.value = v;
+      if (App._pendingColorEdit) {
+        App._pendingColorEdit.color = v;
+        debouncedPreview();        // ← 防抖
+      }
+    }
+  });
+
+  // 确认 / 取消
+  menu.querySelector('#alt-color-confirm').addEventListener('click', () => {
+    if (App._pendingColorEdit) {
+      const { panelIdx, countryId, color, alphaByKey } = App._pendingColorEdit;
+      setCountryColorOverride(panelIdx, countryId, color, alphaByKey);
+      App._pendingColorEdit = null;
+      hideColorMenu();
+      updateHexStyles();       // 一次性刷新即可
+    }
+  });
+  menu.querySelector('#alt-color-cancel').addEventListener('click', () => {
+    App._pendingColorEdit = null; // 丢弃预览
+    hideColorMenu();
+    updateHexStyles();
+  });
+
+  // 点击菜单外关闭
+  document.addEventListener('click', (e) => {
+    if (menu.style.display === 'none') return;
+    if (!menu.contains(e.target)) {
+      App._pendingColorEdit = null;
+      hideColorMenu();
+      updateHexStyles();
+    }
+  });
+
+  // 防抖的预览更新：仅在有 pending 编辑时才预览
+  const debouncedPreview = debounce(() => {
+    if (App._pendingColorEdit) updateHexStyles();
+  }, 160); // 可调：120~200ms
+
+  return menu;
+}
+
+function showColorMenu(x, y, initColor = '#a9d08d') {
+  const menu = ensureColorMenu();
+  const { inp, hex } = {
+    inp: /** @type {HTMLInputElement} */(menu.querySelector('#alt-color-input')),
+    hex: /** @type {HTMLInputElement} */(menu.querySelector('#alt-color-hex')),
+  };
+  inp.value = initColor;
+  hex.value = initColor.toUpperCase();
+
+  // 避免出屏
+  const pad = 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  menu.style.display = 'block';
+  menu.style.left = Math.min(x, vw - menu.offsetWidth - pad) + 'px';
+  menu.style.top  = Math.min(y, vh - menu.offsetHeight - pad) + 'px';
+}
+function hideColorMenu() {
+  const menu = document.getElementById('alt-color-menu');
+  if (menu) menu.style.display = 'none';
+}
+
 
 
 
@@ -1442,10 +1620,41 @@ export async function initSemanticMap({
             event.preventDefault(); event.stopPropagation();
             if (App._clickTimer) { clearTimeout(App._clickTimer); App._clickTimer = null; }
             handleDoubleClick(panelIdx, d.q, d.r, event);
-          }).on('contextmenu', (event) => {
-            // Mac 的 ctrl-click 会触发 contextmenu；阻止它以保证 click 能正常走逻辑
-            event.preventDefault();
-          });
+          }).on('contextmenu', (event, d) => {
+              event.preventDefault(); // 屏蔽系统右键
+              // 仅在 Alt 聚焦语义下启用右键菜单（并且这个 hex 有 country_id）
+              const hex = App.hexMapsByPanel?.[panelIdx]?.get(`${d.q},${d.r}`) || d;
+              const rawCid = hex?.country_id || null;
+              if (!App.modKeys.alt || !rawCid) return;
+
+              const cid = normalizeCountryId(rawCid);
+
+              // 决定改“本面板”还是“跨面板”
+              // 按你的语义：如果这个面板在 altIsolatedPanels 里 → 只作用于本面板；
+              // 否则我们也只对“当前面板”改色（避免误改其它面板）。
+              const targetPanel = panelIdx;
+
+              // 准备 ramp（基于该面板内的该国全部 hex）
+              const { keys, alphaByKey } = buildAlphaRampFor(targetPanel, cid);
+
+              // 选择初始色：已有覆盖色 > 默认聚焦色
+              const curOv = getCountryColorOverride(targetPanel, cid);
+              const initColor = curOv?.color || STYLE.FOCUS_COUNTRY_FILL || '#FCFCFC';
+
+              // 保存为“临时预览”
+              App._pendingColorEdit = {
+                panelIdx: targetPanel,
+                countryId: cid,
+                color: initColor,
+                keys,
+                alphaByKey
+              };
+
+              // 打开菜单到鼠标处
+              showColorMenu(event.clientX, event.clientY, initColor);
+              updateHexStyles(); // 让预览立即生效
+            });
+
 
           return g.attr('transform', d => `translate(${d.x},${d.y})`);
         },
@@ -1807,7 +2016,6 @@ export async function initSemanticMap({
   }
 
   function updateHexStyles() {
-    // —— 每个面板独立计算有效聚焦 —— //
     App.subspaceSvgs.forEach((svg, panelIdx) => {
       const override = App.panelFocusOverrides.get(panelIdx);
       const focusCid  = override && override.countryId ? normalizeCountryId(override.countryId)
@@ -1828,49 +2036,73 @@ export async function initSemanticMap({
         let focusBaseFill    = baseFill;
         let focusBaseOpacity = STYLE.OPACITY_DEFAULT;
         if (focusCid && focusMode === 'filled') {
+          // 默认的“聚焦色 + 非聚焦压暗”
           focusBaseFill    = isFocusHex ? STYLE.FOCUS_COUNTRY_FILL : baseFill;
           focusBaseOpacity = isFocusHex ? STYLE.OPACITY_SELECTED   : STYLE.OPACITY_NONFOCUS;
         }
 
-        // —— 原交互层叠加（保持不变） —— //
-        const isSelected  = App.persistentHexKeys.has(key);
-        const isHovered   = !!(App.hoveredHex &&
-                              App.hoveredHex.panelIdx === panelIdx &&
-                              App.hoveredHex.q === d.q &&
-                              App.hoveredHex.r === d.r);
-        const isFlightStart = !!(App.flightStart &&
-                                App.flightStart.panelIdx === panelIdx &&
-                                App.flightStart.q === d.q &&
-                                App.flightStart.r === d.r);
-        const isFlightHover = !!(App.flightHoverTarget &&
-                                App.flightHoverTarget.panelIdx === panelIdx &&
-                                App.flightHoverTarget.q === d.q &&
-                                App.flightHoverTarget.r === d.r);
+        // —— 叠加“右键改色”的覆盖（含临时预览） —— //
+        let colorOverride = null;
+        let alphaOverride = null;
+
+        // 1) 确认过的覆盖（面板级）
+        if (isFocusHex) {
+          const ov = getCountryColorOverride(panelIdx, thisCid);
+          if (ov) {
+            colorOverride = ov.color;
+            alphaOverride = ov.alphaByKey.get(key) ?? null;
+          }
+        }
+
+        // 2) 临时预览覆盖（只在当前 pending 的面板/国家/keys 上生效）
+        if (App._pendingColorEdit && isFocusHex) {
+          const p = App._pendingColorEdit;
+          if (p.panelIdx === panelIdx && p.countryId === thisCid && p.keys.has(key)) {
+            colorOverride = p.color;
+            alphaOverride = p.alphaByKey.get(key) ?? alphaOverride;
+          }
+        }
+
+        // —— 原交互层（选中/悬停/预览等） —— //
+        const isSelected    = App.persistentHexKeys.has(key);
+        const isHovered     = !!(App.hoveredHex && App.hoveredHex.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r);
+        const isFlightStart = !!(App.flightStart  && App.flightStart.panelIdx  === panelIdx && App.flightStart.q === d.q && App.flightStart.r === d.r);
+        const isFlightHover = !!(App.flightHoverTarget && App.flightHoverTarget.panelIdx === panelIdx && App.flightHoverTarget.q === d.q && App.flightHoverTarget.r === d.r);
 
         const inPreview         = App.highlightedHexKeys.has(key);
         const isPreviewCenter   = inPreview && isHovered;
         const isPreviewNeighbor = inPreview && !isPreviewCenter;
 
         let overlayOpacity = STYLE.OPACITY_DEFAULT;
-        if (isSelected)              overlayOpacity = STYLE.OPACITY_SELECTED;
+        if (isSelected)               overlayOpacity = STYLE.OPACITY_SELECTED;
         else if (isHovered || isFlightStart || isFlightHover)
-                                    overlayOpacity = STYLE.OPACITY_HOVER;
-        else if (isPreviewCenter)    overlayOpacity = STYLE.OPACITY_PREVIEW_CENTER;
-        else if (isPreviewNeighbor)  overlayOpacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;
+                                      overlayOpacity = STYLE.OPACITY_HOVER;
+        else if (isPreviewCenter)     overlayOpacity = STYLE.OPACITY_PREVIEW_CENTER;
+        else if (isPreviewNeighbor)   overlayOpacity = STYLE.OPACITY_PREVIEW_NEIGHBOR;
 
-        const finalOpacity = (focusCid && focusMode === 'filled')
-          ? Math.max(focusBaseOpacity, overlayOpacity)
-          : overlayOpacity;
+      
+        // —— 合成最终填充与透明度 —— //
+        // 规则：
+        // 1) 若有覆盖色（确认 or 预览）并且 hex 属于焦点国家（filled 模式），使用覆盖色；
+        // 2) 覆盖色时，透明度采用“渐变 alphaOverride”与交互 overlayOpacity 的较大值来保证交互仍可见；
+        // 3) 非覆盖色时，沿用原有焦点/非焦点基底透明度与交互 overlayOpacity 的较大值。
+        let finalFill = (focusCid && focusMode === 'filled' && isFocusHex && colorOverride)
+          ? colorOverride
+          : ((focusCid && focusMode === 'filled') ? focusBaseFill : baseFill);
 
-        const finalFill = (focusCid && focusMode === 'filled') ? focusBaseFill : baseFill;
+        let baseOpacity = (focusCid && focusMode === 'filled') ? focusBaseOpacity : STYLE.OPACITY_DEFAULT;
+        if (colorOverride && isFocusHex) {
+          baseOpacity = (alphaOverride != null) ? alphaOverride : baseOpacity;
+        }
+        const finalOpacity = Math.max(baseOpacity, overlayOpacity);
+
         const needHatch = isPreviewNeighbor;
-
         hatch.attr('fill', needHatch ? `url(#hex-hatch-${panelIdx})` : 'none');
         path .attr('fill', finalFill).attr('fill-opacity', finalOpacity);
       });
     });
 
-    // —— 边界重绘：按每个面板的“有效聚焦”分别绘制 —— //
+    // 边界重绘：沿用你原逻辑
     App.currentData?.subspaces?.forEach((space, i) => {
       const svg = App.subspaceSvgs[i];
       if (!svg || svg.empty()) return;
