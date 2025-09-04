@@ -137,7 +137,7 @@ function drawChart() {
 
   const container = d3.select("#paperlistContent");
   const containerWidth = container.node().clientWidth;
-  const margin = { top: 10, left: 10, right: 20, bottom: 0 };
+  const margin = { top: 10, left: 10, right: 4, bottom: 0 };
   const svgWidth = containerWidth - margin.right;
 
   container.html(''); // 清空旧内容
@@ -146,11 +146,23 @@ function drawChart() {
     const groupDiv = container.append("div");
     const paperCount = domainData.value.length;
     const rows = Math.ceil(paperCount / rectsPerRow);
-    const svgHeight = (rectHeight + rectPadding_y) * rows + groupPadding_top;
+    const svgHeight = (rectHeight + rectPadding_y + 5) * rows + groupPadding_top;
 
     const svg = groupDiv.append("svg")
       .attr("width", svgWidth)
       .attr("height", svgHeight);
+
+    // 在 SVG 中添加一个 <foreignObject> 元素
+    const foreignObject = svg.append("foreignObject")
+      .attr("x", svgWidth - 5 * margin.right)
+      .attr("y", 0)
+      .attr("width", 20)
+      .attr("height", 25);
+
+    // 设置 <foreignObject> 的内部 HTML 内容
+    foreignObject.html(`
+    <button class='subspace-close' style='position: relative; top:-4px; right:0px;'>×</button>
+`);
 
     const defs = svg.append("defs");
 
@@ -320,7 +332,7 @@ function drawChart() {
       svg.append("line")
         .attr("x1", margin.left)
         .attr("y1", svgHeight)
-        .attr("x2", svgWidth - margin.right / 2)
+        .attr("x2", svgWidth - margin.right)
         .attr("y2", svgHeight)
         .attr("stroke", "black")
         .attr("stroke-width", 2)
