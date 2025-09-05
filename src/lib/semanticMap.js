@@ -879,7 +879,85 @@ function hideColorMenu() {
   if (menu) menu.style.display = 'none';
 }
 
+// —— Hover Tooltip（与改色菜单同级的小组件）——
+function ensureHexTooltip() {
+  let tip = document.getElementById('hex-tip');
+  if (tip) return tip;
 
+  tip = document.createElement('div');
+  tip.id = 'hex-tip';
+  Object.assign(tip.style, {
+    position: 'fixed',
+    display: 'none',
+    zIndex: 9998,
+    maxWidth: '420px',
+    padding: '10px 12px',
+    borderRadius: '12px',
+    background: 'rgba(30,30,32,0.98)',
+    color: '#fff',
+    boxShadow: '0 8px 18px rgba(0,0,0,0.25)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    backdropFilter: 'blur(6px)',
+    fontSize: '12.5px',
+    lineHeight: '1.45',
+    pointerEvents: 'none' // 绝不截获事件
+  });
+  tip.innerHTML = ''; // 动态填充
+  document.body.appendChild(tip);
+  return tip;
+}
+
+function renderHexTooltipHTML({ color = '#999', msuCount = 0, summary = '' }) {
+  const safeSummary = (summary || '').toString().trim();
+  // 根据数量决定显示 "MSU" 还是 "MSUs"
+  const label = msuCount === 1 ? 'MSU' : 'MSUs';
+
+  return `
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="
+        display:inline-block;width:10px;height:10px;border-radius:50%;
+        background:${color};flex:none;border:1px solid rgba(255,255,255,0.25)
+      "></span>
+      <span style="opacity:.9;flex:none"><b>${msuCount}</b> ${label}: </span>
+      <span style="opacity:.95;flex:1">${safeSummary || '<i style="opacity:.6">No summary</i>'}</span>
+    </div>
+  `;
+}
+
+function showHexTooltip(clientX, clientY, payload) {
+  const tip = ensureHexTooltip();
+  tip.innerHTML = renderHexTooltipHTML(payload);
+
+  const pad = 10;
+  tip.style.display = 'block';
+  // 初步定位在鼠标右下角
+  tip.style.left = (clientX + 14) + 'px';
+  tip.style.top  = (clientY + 14) + 'px';
+
+  // 防溢出：靠右/靠下时往回收
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const rect = tip.getBoundingClientRect();
+  if (rect.right > vw - pad) tip.style.left = (vw - rect.width - pad) + 'px';
+  if (rect.bottom > vh - pad) tip.style.top = (vh - rect.height - pad) + 'px';
+}
+
+function moveHexTooltip(clientX, clientY) {
+  const tip = document.getElementById('hex-tip');
+  if (!tip || tip.style.display === 'none') return;
+  const pad = 10;
+  tip.style.left = (clientX + 14) + 'px';
+  tip.style.top  = (clientY + 14) + 'px';
+
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const rect = tip.getBoundingClientRect();
+  if (rect.right > vw - pad) tip.style.left = (vw - rect.width - pad) + 'px';
+  if (rect.bottom > vh - pad) tip.style.top = (vh - rect.height - pad) + 'px';
+}
+
+function hideHexTooltip() {
+  const tip = document.getElementById('hex-tip');
+  if (tip) tip.style.display = 'none';
+}
 
 
   // flight 端点可见性（用于“端点不可见则不画”）
@@ -1810,7 +1888,46 @@ function hideColorMenu() {
               { withCtrl, withShift, withAlt }
             );
             updateHexStyles();
+
+            // —— Tooltip: 读取 msu 数、summary、国家颜色 —— //
+            const hex = App.hexMapsByPanel?.[panelIdx]?.get(`${d.q},${d.r}`) || d;
+
+            // 1) 统计 MSU 数
+            const msuCount = Array.isArray(hex?.msu_ids) ? hex.msu_ids.length : 0;
+
+            // 2) 读取 summary（后端放在 hex 对象上；没有就为空字符串）
+            const summary = (hex && typeof hex.summary === 'string') ? hex.summary : '';
+
+            // 3) 取当前“国家色”（优先用面板内覆盖色；否则用聚焦色；最后兜底基础填充）
+            let color = '#A0A0A0';
+            const rawCid = hex?.country_id || null;
+            if (rawCid) {
+              const cid = normalizeCountryId(rawCid); // 你已有
+              // 你项目里面板级颜色存储在 App.panelCountryColors（Map）
+              // 先查面板覆盖色
+              const panelMap = App.panelCountryColors?.get(panelIdx);
+              const rec = panelMap?.get?.(cid);
+              if (rec?.color) {
+                color = rec.color;
+              } else if (App.focusCountryId && normalizeCountryId(App.focusCountryId) === cid) {
+                // 聚焦中的国家就用默认聚焦色（与改色菜单默认一致）
+                color = (STYLE.FOCUS_COUNTRY_FILL || '#FCFCFC');
+              } else {
+                // 最后兜底：按该 hex 的 modality 取基础色
+                color = (hex?.modality === 'image') ? App.config.hex.imageFill
+                    : (hex?.modality === 'text')  ? App.config.hex.textFill
+                    : (App.config.background || '#ffffff');
+              }
+            }
+            // 4) 显示 tooltip（用 client 坐标）
+            showHexTooltip(event.clientX, event.clientY, { color, msuCount, summary });
+
           })
+
+          .on('mousemove', (event) => {
+            moveHexTooltip(event.clientX, event.clientY);
+          })
+
           .on('mouseout', (event, d) => {
             if (App.hoveredHex?.panelIdx === panelIdx && App.hoveredHex.q === d.q && App.hoveredHex.r === d.r) {
               App.hoveredHex = null;
@@ -1818,6 +1935,7 @@ function hideColorMenu() {
             // 无论是否有国家聚焦，都清理预览集合
             App.highlightedHexKeys.clear();
             updateHexStyles();
+            hideHexTooltip();
           })
           
           .on('click', (event, d) => {
@@ -3073,6 +3191,7 @@ function observePanelResize() {
     App.currentMouse.y = event.clientY - rect.top;
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, true);
     updateHexStyles();
+    moveHexTooltip(event.clientX, event.clientY);
   };
   document.addEventListener('mousemove', onMouseMoveGlobal);
   cleanupFns.push(() => document.removeEventListener('mousemove', onMouseMoveGlobal));
