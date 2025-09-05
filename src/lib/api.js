@@ -44,3 +44,36 @@ export async function sendQueryToLLM(query, llm = 'ChatGPT') {
   return data.answer;
 }
 
+// 新增：总结MSU句子的函数
+export async function summarizeMsuSentences(sentences) {
+  const prompt = `Please provide a concise and accurate summary based on the following academic text fragments. Requirements:
+1. Summarize core ideas and key information in English
+2. Keep within 50 words
+3. Highlight research focus and conclusions
+4. Avoid redundant descriptions
+
+Text content: ${sentences.join('\n')}`;
+
+  try {
+    const res = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({ 
+        query: prompt, 
+        model: 'gpt-3.5-turbo',
+        max_tokens: 100
+      })
+    });
+    
+    if (!res.ok) {
+      throw new Error('API request failed');
+    }
+    
+    const data = await res.json();
+    return data.answer || 'Summary generation failed';
+  } catch (error) {
+    console.error('Summary generation error:', error);
+    return 'Generating summary...';
+  }
+}
+
