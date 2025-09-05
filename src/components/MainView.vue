@@ -50,6 +50,8 @@ function onSave() {
   const titleText = (mainTitleRef.value?.textContent || '').trim() || 'Semantic Map'
   const createdAt = Date.now()
 
+  // ★ 新增：取小卡用的配色映射
+  const { colorByCountry, colorByPanelCountry, normalizeCountryId,alphaByNode } = controller.getMiniColorMaps();
 
   // —— 打印筛选结果 —— //
   console.groupCollapsed('[SemanticMap] Selection Snapshot')
@@ -58,7 +60,11 @@ function onSave() {
   console.groupEnd()
 
   // —— 广播给右侧 —— //
-  emitSelectionSaved({ ...snap, title: titleText, createdAt })
+  emitSelectionSaved({ ...snap, title: titleText, createdAt,
+  colorByCountry,
+  colorByPanelCountry,
+  normalizeCountryId,
+  alphaByNode })
 }
 
 

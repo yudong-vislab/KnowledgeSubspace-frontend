@@ -36,6 +36,11 @@
                 :link="lk"
                 :nodes="step.nodes || []"
                 :start-count-map="step.startCountMap"
+                :colorByCountry="step.colorByCountry"
+                :colorByPanelCountry="step.colorByPanelCountry"
+                :normalizeCountryId="step.normalizeCountryId"
+                :alpha-by-node="step.alphaByNode"
+                :default-alpha="step.defaultAlpha"
               />
             </div>
           </div>
@@ -81,6 +86,13 @@ onMounted(() => {
       nodes,
       links,
       startCountMap: buildStartCountMap(links),   // ★ 提前算好供子卡片用
+      colorByCountry: payload.colorByCountry || {},
+      colorByPanelCountry: payload.colorByPanelCountry || {},
+      normalizeCountryId: payload.normalizeCountryId || ((x) => x),
+
+      // ★★★ 新增：把透明度变成 node 粒度映射存起来
+      alphaByNode: payload.alphaByNode || {},  
+
       rawText: payload.rawText || '',
       summary: payload.summary || '',
       meta: payload.meta || {}
@@ -92,6 +104,78 @@ onMounted(() => {
   })
 })
 onBeforeUnmount(() => offSaved?.())
+
+/**
+ * 将上游 payload 里的透明度信息整理成  Map("panelIdx:q,r" -> alpha)
+ * 兼容几种可能的来源：
+ *  - payload.alphaByNode:        { "p:q,r": a, ... } 或 Map
+ *  - payload.alphaByKey:         { "p|q,r": a, ... } 或 Map（来自 semanticMap 的 alphaByKey）
+ *  - payload.colorOverridesByPanel: Map(panelIdx -> Map(countryId -> { alphaByKey: Map(...) }))
+ */
+function buildAlphaByNode(payload, nodes) {
+  const out = new Map();
+  const idOf = (p,q,r) => `${p}:${q},${r}`;
+
+  // ① 直接给了 alphaByNode（最优先）
+  const abn = payload?.alphaByNode;
+  if (abn instanceof Map) {
+    abn.forEach((a, k) => out.set(String(k), Number(a)));
+    return out;
+  }
+  if (abn && typeof abn === 'object') {
+    Object.keys(abn).forEach(k => out.set(String(k), Number(abn[k])));
+    return out;
+  }
+
+  // ② 给了 alphaByKey（"p|q,r" -> alpha），把分隔符转换一下
+  const abk = payload?.alphaByKey;
+  if (abk instanceof Map) {
+    abk.forEach((a, key) => {
+      const [pStr, qr] = String(key).split('|');
+      if (!qr) return;
+      const [qStr, rStr] = qr.split(',');
+      out.set(idOf(+pStr, +qStr, +rStr), Number(a));
+    });
+    return out;
+  }
+  if (abk && typeof abk === 'object') {
+    Object.keys(abk).forEach(key => {
+      const [pStr, qr] = String(key).split('|');
+      if (!qr) return;
+      const [qStr, rStr] = qr.split(',');
+      out.set(idOf(+pStr, +qStr, +rStr), Number(abk[key]));
+    });
+    return out;
+  }
+
+  // ③ 从 colorOverridesByPanel 深挖（semanticMap 内部结构）
+  const cop = payload?.colorOverridesByPanel; // 可能是 Map 或对象
+  const forEachKV = (mapLike, fn) => {
+    if (!mapLike) return;
+    if (mapLike instanceof Map) { mapLike.forEach(fn); return; }
+    if (typeof mapLike === 'object') { Object.keys(mapLike).forEach(k => fn(mapLike[k], k)); }
+  };
+  forEachKV(cop, (byCountry, panelIdxKey) => {
+    const pIdx = Number(panelIdxKey);
+    forEachKV(byCountry, (ov) => {
+      const alphaByKey = ov?.alphaByKey;
+      if (!alphaByKey) return;
+      forEachKV(alphaByKey, (a, key) => {
+        const [pStr, qr] = String(key).split('|'); // "p|q,r"
+        if (!qr) return;
+        const [qStr, rStr] = qr.split(',');
+        if (+pStr !== pIdx) return;
+        out.set(idOf(pIdx, +qStr, +rStr), Number(a));
+      });
+    });
+  });
+
+  // ④ 兜底：如果完全拿不到透明度，给已存在节点一个默认 1（可按需改）
+  if (out.size === 0 && Array.isArray(nodes)) {
+    nodes.forEach(n => out.set(idOf(n.panelIdx, n.q, n.r), 1));
+  }
+  return out;
+}
 
 /** ====== 标题编辑 ====== */
 function beginEditTitle(i, evt) {

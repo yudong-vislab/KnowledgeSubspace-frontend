@@ -422,7 +422,7 @@ async function onClearPaper() {
       <div class="lp-card__body scroll-auto-hide" ref="chartContainerRef"></div>
       <div id="paperlistContent" style="width: 100%; height: 100%; overflow: auto; padding: 2px;"></div>
 
-      <div id="modalOverlay" style="z-index: 99999;">
+      <div id="modalOverlay" style="z-index: 9999;">
         <div id="pdfModal">
           <span id="closeModalBtn">&times;</span>
           <h3 id="pdfTitle">PDF Viewer</h3>
@@ -628,7 +628,7 @@ async function onClearPaper() {
   display: none;
   justify-content: center;
   align-items: center;
-  z-index: 1000;
+  z-index: 10000;
 }
 
 /* 模态框样式 */

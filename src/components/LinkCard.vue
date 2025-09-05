@@ -62,8 +62,17 @@ import { summarizeMsuSentences } from '@/lib/api'
 const props = defineProps({
   link:  { type: Object, required: true },
   nodes: { type: Array,  default: () => [] },
-  /** Step 级别传入：每个点作为"起点"的出现次数（决定 city/capital） */
-  startCountMap: { type: Object, default: () => new Map() }
+  startCountMap: { type: Object, default: () => new Map() },
+
+  // 颜色映射（已有）
+  colorByCountry: { type: [Object, Map], default: () => ({}) },
+  colorByPanelCountry: { type: [Object, Map], default: () => ({}) },
+  normalizeCountryId: { type: Function, default: (x) => x },
+
+  // ★ NEW：透明度映射，key = "panelIdx:q,r"；既支持 Map 也支持普通对象
+  alphaByNode: { type: [Object, Map], default: () => ({}) },
+  // ★ NEW：默认透明度（没有命中 alphaByNode 时用）
+  defaultAlpha: { type: Number, default: 1 }
 })
 
 const svgRef = ref(null)
@@ -159,22 +168,53 @@ onMounted(() => {
   mini = mountMiniLink(svgRef.value, {
     link: props.link,
     nodes: props.nodes,
-    startCountMap: props.startCountMap
+    startCountMap: props.startCountMap,
+
+    colorByCountry: props.colorByCountry,
+    colorByPanelCountry: props.colorByPanelCountry,
+    normalizeCountryId: props.normalizeCountryId,
+
+    // ★ 透传透明度
+    alphaByNode: props.alphaByNode,
+    defaultAlpha: props.defaultAlpha
   })
 })
 
-watch(() => [props.link, props.nodes, props.startCountMap], () => {
-  mini?.update({
-    link: props.link,
-    nodes: props.nodes,
-    startCountMap: props.startCountMap
-  })
-}, { deep: true })
+watch(
+  () => [
+    props.link,
+    props.nodes,
+    props.startCountMap,
+    props.colorByCountry,
+    props.colorByPanelCountry,
+    props.normalizeCountryId,
+    // ★ 监听这两个
+    props.alphaByNode,
+    props.defaultAlpha
+  ],
+  () => {
+    mini?.update({
+      link: props.link,
+      nodes: props.nodes,
+      startCountMap: props.startCountMap,
+
+      colorByCountry: props.colorByCountry,
+      colorByPanelCountry: props.colorByPanelCountry,
+      normalizeCountryId: props.normalizeCountryId,
+
+      // ★ 透传透明度
+      alphaByNode: props.alphaByNode,
+      defaultAlpha: props.defaultAlpha
+    })
+  },
+  { deep: true }
+)
 
 onBeforeUnmount(() => mini?.destroy())
 </script>
 
 <style scoped>
+/* 原样保留你的样式 */
 .subcard{
   border:1px dashed #e5e7eb; border-radius:10px;
   display:grid; gap:4px;
@@ -297,6 +337,5 @@ onBeforeUnmount(() => mini?.destroy())
 }
 
 .placeholder{ color:#9ca3af; font-size:12px; }
-
 .mini{ height:100%; display:block; }
 </style>
