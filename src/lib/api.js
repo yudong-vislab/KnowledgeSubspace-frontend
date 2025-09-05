@@ -51,6 +51,8 @@ export async function summarizeMsuSentences(sentences) {
 2. Keep within 50 words
 3. Highlight research focus and conclusions
 4. Avoid redundant descriptions
+Your result should be in the format of:
+{"Summary": "Your summary here"}
 
 Text content: ${sentences.join('\n')}`;
 
@@ -70,7 +72,23 @@ Text content: ${sentences.join('\n')}`;
     }
     
     const data = await res.json();
-    return data.answer || 'Summary generation failed';
+    console.log('API response:', data);
+    
+    // 处理JSON字符串格式的响应
+    let responseText = data.answer || '';
+    if (typeof responseText === 'string') {
+      try {
+        // 尝试解析JSON字符串
+        const parsed = JSON.parse(responseText);
+        return parsed.Summary || parsed.summary || responseText;
+      } catch (e) {
+        // 如果不是JSON格式，直接返回文本
+        return responseText;
+      }
+    }
+    
+    // 如果是对象格式
+    return data.Summary || data.summary || responseText;
   } catch (error) {
     console.error('Summary generation error:', error);
     return 'Generating summary...';
