@@ -37,27 +37,26 @@ function pick(mapLike, key) {
 
 /** 节点着色：先 panel+country 覆盖 → 再全局 country → 最后 modality 回退 */
 function resolveNodeColor(
-   n,
-   { colorByCountry, colorByPanelCountry, normalizeCountryId = (x)=>x } = {}
- ) {
-    if (!n) return STYLE.COLOR_DEFAULT;
-    const cidRaw = n.country_id;
-    const cid = (cidRaw == null) ? null : normalizeCountryId(cidRaw);
+  n,
+  { colorByCountry, colorByPanelCountry, normalizeCountryId = (x)=>x } = {}
+) {
+  if (!n) return STYLE.COLOR_DEFAULT;
+  const cidRaw = n.country_id;
+  const cid = (cidRaw == null) ? null : normalizeCountryId(cidRaw);
 
-    if (cid != null && Number.isInteger(n.panelIdx)) {
-      const k = `${n.panelIdx}|${cid}`;
-      const p = pick(colorByPanelCountry, k);
-      if (p) return p;
-    }
-    if (cid != null) {
-      const g = pick(colorByCountry, cid);
-      if (g) return g;
-    }
-    return n.modality === 'text' ? STYLE.COLOR_TEXT
-         : n.modality === 'image' ? STYLE.COLOR_IMAGE
-         : STYLE.COLOR_DEFAULT;
+  if (cid != null && Number.isInteger(n.panelIdx)) {
+    const k = `${n.panelIdx}|${cid}`;
+    const p = pick(colorByPanelCountry, k);
+    if (p) return p;
   }
-
+  if (cid != null) {
+    const g = pick(colorByCountry, cid);
+    if (g) return g;
+  }
+  return n.modality === 'text' ? STYLE.COLOR_TEXT
+       : n.modality === 'image' ? STYLE.COLOR_IMAGE
+       : STYLE.COLOR_DEFAULT;
+}
 
 /** 统计起点次数（city/capital 用） */
 export function buildStartCountMap(links = []) {
@@ -92,11 +91,10 @@ function drawCityOrCapital(g, count) {
 }
 
 /**
- * 挂载一条 link 的迷你预览
- * 额外支持：
- *  - colorByCountry: { [countryId]: "#RRGGBB" } 或 Map
- *  - colorByPanelCountry: { ["panelIdx|countryId"]: "#RRGGBB" } 或 Map
- *  - normalizeCountryId: (cid) => cid   // 可选，保持与 semanticMap 的 alias 一致
+ * 迷你预览（右卡片）
+ * 新增支持：
+ *   - alphaByNode: Map|Object，key 形如 "panelIdx:q,r"，值是 0~1
+ *   - defaultAlpha: number，未命中时使用（默认 1）
  */
 export function mountMiniLink(
   svgEl,
@@ -106,7 +104,9 @@ export function mountMiniLink(
     startCountMap = new Map(),
     colorByCountry = null,
     colorByPanelCountry = null,
-    normalizeCountryId = identity
+    normalizeCountryId = (x)=>x,
+    alphaByNode = null,              // ★ NEW
+    defaultAlpha = 1                 // ★ NEW
   }
 ) {
   const svg = d3.select(svgEl);
@@ -121,7 +121,11 @@ export function mountMiniLink(
     else nodesSel.attr('opacity', function(){ return this.dataset.id === hoveredId ? 1 : STYLE.HOVER_DIM; });
   }
 
-  function render({ link, nodes, startCountMap, colorByCountry, colorByPanelCountry, normalizeCountryId }) {
+  function render({
+    link, nodes, startCountMap,
+    colorByCountry, colorByPanelCountry, normalizeCountryId,
+    alphaByNode, defaultAlpha
+  }) {
     svg.selectAll('*').remove();
 
     const path = Array.isArray(link?.path) ? link.path : [];
@@ -163,6 +167,10 @@ export function mountMiniLink(
           .attr('class', 'hex')
           .attr('d', hexD)
           .attr('fill', d => resolveNodeColor(nodeMap.get(d._id), { colorByCountry, colorByPanelCountry, normalizeCountryId }))
+          .attr('fill-opacity', d => {                      // ★ NEW：节点透明度
+            const a = pick(alphaByNode, d._id);
+            return (typeof a === 'number' && a >= 0 && a <= 1) ? a : defaultAlpha;
+          })
           .attr('stroke', '#ffffff')
           .attr('stroke-width', 1);
 
@@ -181,11 +189,22 @@ export function mountMiniLink(
     applyHover(hoveredId);
   }
 
-  render({ link, nodes, startCountMap, colorByCountry, colorByPanelCountry, normalizeCountryId });
+  render({
+    link, nodes, startCountMap,
+    colorByCountry, colorByPanelCountry, normalizeCountryId,
+    alphaByNode, defaultAlpha
+  });
   offHover = onRightHover(applyHover);
 
   return {
-    update(next) { render({ ...next, normalizeCountryId: next?.normalizeCountryId || normalizeCountryId }); },
+    update(next) {
+      render({
+        ...next,
+        normalizeCountryId: next?.normalizeCountryId || normalizeCountryId,
+        alphaByNode: next?.alphaByNode ?? alphaByNode,
+        defaultAlpha: next?.defaultAlpha ?? defaultAlpha
+      });
+    },
     destroy() { offHover && offHover(); }
   };
 }

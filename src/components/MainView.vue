@@ -51,7 +51,7 @@ function onSave() {
   const createdAt = Date.now()
 
   // ★ 新增：取小卡用的配色映射
-  const { colorByCountry, colorByPanelCountry, normalizeCountryId } = controller.getMiniColorMaps();
+  const { colorByCountry, colorByPanelCountry, normalizeCountryId,alphaByNode } = controller.getMiniColorMaps();
 
   // —— 打印筛选结果 —— //
   console.groupCollapsed('[SemanticMap] Selection Snapshot')
@@ -63,7 +63,8 @@ function onSave() {
   emitSelectionSaved({ ...snap, title: titleText, createdAt,
   colorByCountry,
   colorByPanelCountry,
-  normalizeCountryId })
+  normalizeCountryId,
+  alphaByNode })
 }
 
 

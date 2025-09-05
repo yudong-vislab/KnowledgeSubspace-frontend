@@ -80,6 +80,7 @@ const STYLE = {
   FOCUS_COUNTRY_FILL: '#FCFCFC',   // Alt 聚焦国家的统一填充色（不区分 modality）
   OPACITY_NONFOCUS: 0.08,          // Alt 聚焦时，非该国家 hex 的压暗透明度
 
+
 };
 
 // src/lib/semanticMap.js（在 STYLE 下方添加）
@@ -93,6 +94,7 @@ const LAYOUT = {
   MIN_W: STYLE.SUBSPACE_MIN_W,
   MIN_H: STYLE.SUBSPACE_MIN_H,
 };
+
 
 /* =========================
  * 初始化入口
@@ -236,6 +238,21 @@ export async function initSemanticMap({
       .concat([[radius, 0]]);
   };
 
+    // —— 统一键名 —— //
+  const keyHexColon = (panelIdx,q,r) => `${panelIdx}:${q},${r}`;   // 给右卡片/miniPathRenderer
+  const keyHexPipe  = (panelIdx,q,r) => `${panelIdx}|${q},${r}`;   // 你当前面板内 alphaByKey 可能用这个
+  const keyPanelCountry = (panelIdx,cid) => `${panelIdx}|${normalizeCountryId(cid)}`;
+
+  // —— 容忍 Map/对象 —— //
+  function pick(mapLike, key) {
+    if (!mapLike) return null;
+    const k1 = key, k2 = String(key);
+    if (mapLike instanceof Map) return mapLike.get(k1) ?? mapLike.get(k2) ?? null;
+    if (typeof mapLike === 'object') return (mapLike[k1] ?? mapLike[k2] ?? null);
+    return null;
+  }
+
+
   function getCountryKeys(panelIdx, countryId) {
     const m = App.countryKeysByPanel?.[panelIdx];
     if (!m) return new Set();
@@ -253,6 +270,26 @@ export async function initSemanticMap({
     });
     return out;
   }
+
+  function clearAltFocusForPanelOnNormalClick(panelIdx) {
+    let changed = false;
+
+    // 全局 Alt 聚焦关掉（不影响你已确认的颜色表）
+    if (App.focusCountryId) {
+      setCountryFocus(null, null);   // 会清 App.highlightedHexKeys
+      changed = true;
+    }
+
+    // 本面板若有本地聚焦也一并关掉
+    const local = App.panelFocusOverrides.get(panelIdx);
+    if (local && local.countryId) {
+      App.panelFocusOverrides.set(panelIdx, { countryId: null, mode: null });
+      changed = true;
+    }
+
+    if (changed) updateHexStyles();  // 让整国涂色立刻消失
+  }
+
 
   // —— 简易防抖 —— //
   function debounce(fn, wait = 240) {
@@ -321,98 +358,216 @@ export async function initSemanticMap({
   // —— 颜色快照工具：把面板级国家改色拍扁成两个映射 ——
   // 1) colorByCountry: { [normCountryId]: "#RRGGBB" }（跨面板统一色，取第一次出现为主）
   // 2) colorByPanelCountry: { ["panelIdx|normCountryId"]: "#RRGGBB" }（面板内覆盖）
+  // —— 小工具：把 "p|q,r" 统一成 "p:q,r" —— //
+  const _keyPipeToColon = (k) => {
+    if (typeof k !== 'string') return String(k);
+    const i = k.indexOf('|');
+    return i >= 0 ? `${k.slice(0,i)}:${k.slice(i+1)}` : k;
+  };
+
+  // —— 从 App 中构造小卡用的颜色 & 透明度快照 —— //
+  function _buildMiniSnapshot() {
+    const colorByCountry = {};
+    const colorByPanelCountry = {};
+    const alphaByNode = {}; // key: "panelIdx:q,r" → 0~1
+
+    // 颜色：来自 App.panelCountryColors（你的存储结构）
+    if (App && App.panelCountryColors instanceof Map) {
+      App.panelCountryColors.forEach((m, panelIdx) => {
+        if (!(m instanceof Map)) return;
+        m.forEach((rec, rawCid) => {
+          const cid = App.countryIdAlias?.get?.(rawCid) || rawCid;
+          const hex = rec?.color || null;
+          if (hex) {
+            colorByPanelCountry[`${panelIdx}|${cid}`] = hex;
+            if (!(cid in colorByCountry)) colorByCountry[cid] = hex;
+          }
+
+          // 透明度：优先 rec.alphaByKey（Map 或对象）
+          const abk = rec?.alphaByKey;
+          if (abk instanceof Map) {
+            abk.forEach((a, k) => {
+              if (typeof a === 'number' && a >= 0 && a <= 1) {
+                alphaByNode[_keyPipeToColon(k)] = a;
+              }
+            });
+          } else if (abk && typeof abk === 'object') {
+            Object.entries(abk).forEach(([k, a]) => {
+              if (typeof a === 'number' && a >= 0 && a <= 1) {
+                alphaByNode[_keyPipeToColon(k)] = a;
+              }
+            });
+          }
+        });
+      });
+    }
+
+    // 透明度兜底：渲染时缓存（updateHexStyles 写入）
+    if (App && App.alphaCacheByHex) {
+      if (App.alphaCacheByHex instanceof Map) {
+        App.alphaCacheByHex.forEach((a, k) => {
+          const kc = _keyPipeToColon(k);
+          if (alphaByNode[kc] == null && typeof a === 'number' && a >= 0 && a <= 1) {
+            alphaByNode[kc] = a;
+          }
+        });
+      } else if (typeof App.alphaCacheByHex === 'object') {
+        Object.entries(App.alphaCacheByHex).forEach(([k, a]) => {
+          const kc = _keyPipeToColon(k);
+          if (alphaByNode[kc] == null && typeof a === 'number' && a >= 0 && a <= 1) {
+            alphaByNode[kc] = a;
+          }
+        });
+      }
+    }
+
+    const normalizeCountryId = (cid) => App.countryIdAlias?.get?.(cid) || cid;
+    return { colorByCountry, colorByPanelCountry, alphaByNode, normalizeCountryId };
+  }
+
+
   function _buildColorMapsSnapshot() {
     const colorByCountry = {};
     const colorByPanelCountry = {};
+    const alphaByNode = {}; // ★ 新增
+
+    // 颜色：保持你原有逻辑
     if (App && App.panelCountryColors instanceof Map) {
       App.panelCountryColors.forEach((m, panelIdx) => {
         if (!(m instanceof Map)) return;
         m.forEach((rec, rawCid) => {
           const cid = normalizeCountryId ? normalizeCountryId(rawCid) : rawCid;
           const hex = rec?.color || null;
-          if (!hex) return;
-          // 面板级
-          colorByPanelCountry[`${panelIdx}|${cid}`] = hex;
-          // 跨面板（第一次写入为主）
-          if (!(cid in colorByCountry)) colorByCountry[cid] = hex;
+          if (hex) {
+            colorByPanelCountry[`${panelIdx}|${cid}`] = hex;
+            if (!(cid in colorByCountry)) colorByCountry[cid] = hex;
+          }
+
+          // 透明度优先来源：覆盖记录里的 alphaByKey
+          const abk = rec?.alphaByKey;
+          if (abk instanceof Map) {
+            abk.forEach((a, k) => {
+              const keyColon = _keyPipeToColon(k);
+              if (typeof a === 'number' && a >= 0 && a <= 1) alphaByNode[keyColon] = a;
+            });
+          } else if (abk && typeof abk === 'object') {
+            Object.entries(abk).forEach(([k, a]) => {
+              const keyColon = _keyPipeToColon(k);
+              if (typeof a === 'number' && a >= 0 && a <= 1) alphaByNode[keyColon] = a;
+            });
+          }
         });
       });
     }
-    return { colorByCountry, colorByPanelCountry };
-  }
 
-
-
-  // 在指定 svg 里确保存在一个用于“预览态”的斜线填充 pattern
-  function ensureHatchPattern(svgSel) {
-    if (!svgSel || svgSel.empty && svgSel.empty()) return;
-    const defs = svgSel.select('defs').empty() ? svgSel.append('defs') : svgSel.select('defs');
-    if (defs.select(`#${STYLE.HATCH_ID}`).empty()) {
-      const pat = defs.append('pattern')
-        .attr('id', STYLE.HATCH_ID)
-        .attr('patternUnits', 'userSpaceOnUse')
-        .attr('width', 6).attr('height', 6)
-        .attr('patternTransform', 'rotate(45)');
-      pat.append('line')
-        .attr('x1', 0).attr('y1', 0)
-        .attr('x2', 0).attr('y2', 6)
-        .attr('stroke', '#444')        // 阴影线的颜色（可按需调整）
-        .attr('stroke-width', 1)
-        .attr('stroke-opacity', 0.6);  // 线条稍微淡一些
+    // 透明度次级来源：渲染缓存（updateHexStyles 写入的最终透明度）
+    if (App && App.alphaCacheByHex) {
+      if (App.alphaCacheByHex instanceof Map) {
+        App.alphaCacheByHex.forEach((a, k) => {
+          const keyColon = _keyPipeToColon(k);
+          if (alphaByNode[keyColon] == null && typeof a === 'number' && a >= 0 && a <= 1) {
+            alphaByNode[keyColon] = a;
+          }
+        });
+      } else if (typeof App.alphaCacheByHex === 'object') {
+        Object.entries(App.alphaCacheByHex).forEach(([k, a]) => {
+          const keyColon = _keyPipeToColon(k);
+          if (alphaByNode[keyColon] == null && typeof a === 'number' && a >= 0 && a <= 1) {
+            alphaByNode[keyColon] = a;
+          }
+        });
+      }
     }
+
+    return { colorByCountry, colorByPanelCountry, alphaByNode }; // ★ 返回多一个
   }
 
-  const safeNum = (v, fallback = 0) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  };
-  function isConnectActive() {
-    return !!(App.insertMode || App.flightStart);
-  }
-  function isConnectArmedNow(withCtrl, withShift) {
-    // 只要“键盘 Ctrl+Shift” 或 “按钮黄灯 connectArmed”为真，即判定为 armed
-    return (!!withCtrl && !!withShift) || App.uiPref.connectArmed;
-  }
+    function degradeFocusToOutlineFor(panelIdx) {
+      // 面板级优先：如果该面板有本地聚焦，改成 outline
+      const local = App.panelFocusOverrides.get(panelIdx);
+      if (local && local.countryId && local.mode !== 'outline') {
+        App.panelFocusOverrides.set(panelIdx, { countryId: local.countryId, mode: 'outline' });
+        return true;
+      }
+      // 否则退全局：有全局聚焦就把模式改成 outline（不清 countryId）
+      if (App.focusCountryId && App.focusMode !== 'outline') {
+        App.focusMode = 'outline';
+        return true;
+      }
+      return false;
+    }
 
-  // ★ 新增：Route 模式是否开启（键盘 Ctrl/⌘ 或 按钮 Route 绿灯）
-  function isRouteMode(withCtrlLike) {
-    return !!withCtrlLike || App.uiPref.route;
-  }
 
-  const isFiniteTransform = (t) => t && Number.isFinite(t.x) && Number.isFinite(t.y) && Number.isFinite(t.k);
+    // 在指定 svg 里确保存在一个用于“预览态”的斜线填充 pattern
+    function ensureHatchPattern(svgSel) {
+      if (!svgSel || svgSel.empty && svgSel.empty()) return;
+      const defs = svgSel.select('defs').empty() ? svgSel.append('defs') : svgSel.select('defs');
+      if (defs.select(`#${STYLE.HATCH_ID}`).empty()) {
+        const pat = defs.append('pattern')
+          .attr('id', STYLE.HATCH_ID)
+          .attr('patternUnits', 'userSpaceOnUse')
+          .attr('width', 6).attr('height', 6)
+          .attr('patternTransform', 'rotate(45)');
+        pat.append('line')
+          .attr('x1', 0).attr('y1', 0)
+          .attr('x2', 0).attr('y2', 6)
+          .attr('stroke', '#444')        // 阴影线的颜色（可按需调整）
+          .attr('stroke-width', 1)
+          .attr('stroke-opacity', 0.6);  // 线条稍微淡一些
+      }
+    }
 
-  function getPanelRect(panelIdx) {
-    const panelDom = App.playgroundEl.querySelectorAll('.subspace')[panelIdx];
-    if (!panelDom) return null;
-    const container = panelDom.querySelector('.hex-container');
-    if (!container) return null;
-    const playgroundRect = App.playgroundEl.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    return {
-      left: containerRect.left - playgroundRect.left,
-      top: containerRect.top - playgroundRect.top,
-      right: containerRect.right - playgroundRect.left,
-      bottom: containerRect.bottom - playgroundRect.top
+    const safeNum = (v, fallback = 0) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
     };
-  }
-  const pointInRect = (x, y, rect) =>
-    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    function isConnectActive() {
+      return !!(App.insertMode || App.flightStart);
+    }
+    function isConnectArmedNow(withCtrl, withShift) {
+      // 只要“键盘 Ctrl+Shift” 或 “按钮黄灯 connectArmed”为真，即判定为 armed
+      return (!!withCtrl && !!withShift) || App.uiPref.connectArmed;
+    }
 
-  function getHexGlobalXY(panelIdx, q, r) {
-    const hexMap = App.hexMapsByPanel[panelIdx];
-    if (!hexMap) return null;
-    const hex = hexMap.get(`${q},${r}`);
-    if (!hex) return null;
-    const panelDom = App.playgroundEl.querySelectorAll('.subspace')[panelIdx];
-    const container = panelDom.querySelector('.hex-container');
-    const playgroundRect = App.playgroundEl.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    const offsetX = containerRect.left - playgroundRect.left;
-    const offsetY = containerRect.top - playgroundRect.top;
-    const t = App.zoomStates[panelIdx] || d3.zoomIdentity;
-    const [tx, ty] = [t.applyX(hex.x), t.applyY(hex.y)];
-    return [tx + offsetX, ty + offsetY];
-  }
+    // ★ 新增：Route 模式是否开启（键盘 Ctrl/⌘ 或 按钮 Route 绿灯）
+    function isRouteMode(withCtrlLike) {
+      return !!withCtrlLike || App.uiPref.route;
+    }
+
+    const isFiniteTransform = (t) => t && Number.isFinite(t.x) && Number.isFinite(t.y) && Number.isFinite(t.k);
+
+    function getPanelRect(panelIdx) {
+      const panelDom = App.playgroundEl.querySelectorAll('.subspace')[panelIdx];
+      if (!panelDom) return null;
+      const container = panelDom.querySelector('.hex-container');
+      if (!container) return null;
+      const playgroundRect = App.playgroundEl.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      return {
+        left: containerRect.left - playgroundRect.left,
+        top: containerRect.top - playgroundRect.top,
+        right: containerRect.right - playgroundRect.left,
+        bottom: containerRect.bottom - playgroundRect.top
+      };
+    }
+    const pointInRect = (x, y, rect) =>
+      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+
+    function getHexGlobalXY(panelIdx, q, r) {
+      const hexMap = App.hexMapsByPanel[panelIdx];
+      if (!hexMap) return null;
+      const hex = hexMap.get(`${q},${r}`);
+      if (!hex) return null;
+      const panelDom = App.playgroundEl.querySelectorAll('.subspace')[panelIdx];
+      const container = panelDom.querySelector('.hex-container');
+      const playgroundRect = App.playgroundEl.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const offsetX = containerRect.left - playgroundRect.left;
+      const offsetY = containerRect.top - playgroundRect.top;
+      const t = App.zoomStates[panelIdx] || d3.zoomIdentity;
+      const [tx, ty] = [t.applyX(hex.x), t.applyY(hex.y)];
+      return [tx + offsetX, ty + offsetY];
+    }
 
     // 为每个 panel 的 <svg> 确保一个斜线填充 pattern
     function ensureHatchDefs(svgSel, panelIdx) {
@@ -470,21 +625,14 @@ export async function initSemanticMap({
       return { colorByCountry, colorByPanelCountry };
     }
 
-  function degradeFocusToOutlineFor(panelIdx) {
-    // 面板级优先：如果该面板有本地聚焦，改成 outline
-    const local = App.panelFocusOverrides.get(panelIdx);
-    if (local && local.countryId && local.mode !== 'outline') {
-      App.panelFocusOverrides.set(panelIdx, { countryId: local.countryId, mode: 'outline' });
-      return true;
-    }
-    // 否则退全局：有全局聚焦就把模式改成 outline（不清 countryId）
-    if (App.focusCountryId && App.focusMode !== 'outline') {
-      App.focusMode = 'outline';
-      return true;
-    }
-    return false;
-  }
 
+
+  // === 坐标/变换工具：把 axial(0,0) 精准放到容器中心 =================
+  function axialToXY(q, r, radius = App.config.hex.radius) {
+    // 平顶六边形（flat-top）轴坐标 → 像素
+    // x = 1.5R * q,  y = sqrt(3)R * (r + q/2)
+    return [1.5 * radius * q, Math.sqrt(3) * radius * (r + q / 2)];
+  }
 
   // 从当前已选节点集合（persistentHexKeys）推导出涉及到的整条线路，灌入 selectedRouteIds
   function seedSelectedRoutesFromPersistent() {
@@ -526,19 +674,54 @@ App.panelCountryColors = new Map();
 App._pendingColorEdit = null; 
 // { panelIdx, countryId, color, keys:Set<"p|q,r">, alphaByKey:Map }
 
-function getCountryColorOverride(panelIdx, countryId) {
-  const m = App.panelCountryColors.get(panelIdx);
-  return m ? m.get(normalizeCountryId(countryId)) : null;
+// —— 统一的内部归一化 —— //
+function _normCid(cid) {
+  try {
+    return (typeof normalizeCountryId === 'function') ? normalizeCountryId(cid) : cid;
+  } catch { return cid; }
 }
+
+// —— 覆盖色：写入 —— //
 function setCountryColorOverride(panelIdx, countryId, color, alphaByKey) {
-  const cid = normalizeCountryId(countryId);
-  if (!App.panelCountryColors.has(panelIdx)) App.panelCountryColors.set(panelIdx, new Map());
-  App.panelCountryColors.get(panelIdx).set(cid, { color, alphaByKey });
+  if (!App.panelCountryColors) App.panelCountryColors = new Map();
+
+  let perPanel = App.panelCountryColors.get(panelIdx);
+  if (!perPanel) {
+    perPanel = new Map();
+    App.panelCountryColors.set(panelIdx, perPanel);
+  }
+
+  const cid = _normCid(countryId);
+
+  // 统一 alphaByKey 的 key 形态 -> `${panelIdx}|${q},${r}`
+  let alphaMap = new Map();
+  if (alphaByKey instanceof Map) {
+    alphaMap = new Map(
+      Array.from(alphaByKey.entries()).map(([k, v]) => {
+        const kk = (typeof k === 'string')
+          ? (k.includes('|') ? k : k.replace(':', '|'))    // "p:q,r" -> "p|q,r"
+          : String(k);
+        return [kk, v];
+      })
+    );
+  } else if (alphaByKey && typeof alphaByKey === 'object') {
+    for (const [k, v] of Object.entries(alphaByKey)) {
+      const kk = k.includes('|') ? k : k.replace(':', '|');
+      alphaMap.set(kk, v);
+    }
+  }
+
+  perPanel.set(cid, { color, alphaByKey: alphaMap });
 }
-function clearCountryColorOverride(panelIdx, countryId) {
-  const m = App.panelCountryColors.get(panelIdx);
-  if (m) m.delete(normalizeCountryId(countryId));
+
+// —— 覆盖色：读取 —— //
+function getCountryColorOverride(panelIdx, countryId) {
+  const perPanel = App.panelCountryColors?.get(panelIdx);
+  if (!perPanel) return null;
+  const cid = _normCid(countryId);
+  return perPanel.get(cid) || null;
 }
+
 
 // 依据“该面板 + 国家”的实际 hex 集合，生成一条透明度比例尺（层次感）
 // 策略：按 y 再按 x 排序，做一个从 0.65 → 1.0 的线性渐变
@@ -629,14 +812,28 @@ function ensureColorMenu() {
 
   // 确认 / 取消
   menu.querySelector('#alt-color-confirm').addEventListener('click', () => {
-    if (App._pendingColorEdit) {
-      const { panelIdx, countryId, color, alphaByKey } = App._pendingColorEdit;
-      setCountryColorOverride(panelIdx, countryId, color, alphaByKey);
-      App._pendingColorEdit = null;
-      hideColorMenu();
-      updateHexStyles();       // 一次性刷新即可
+    if (!App._pendingColorEdit) return;
+
+    // 兜底取最新的颜色（文本框 > 取色器 > pending）
+    const colorInp = /** @type {HTMLInputElement} */(menu.querySelector('#alt-color-input'));
+    const colorHex = /** @type {HTMLInputElement} */(menu.querySelector('#alt-color-hex'));
+    let chosen = (colorHex?.value || colorInp?.value || App._pendingColorEdit.color || '').trim();
+    if (!/^#([0-9a-f]{6})$/i.test(chosen)) {
+      // 非法则直接不要存，避免污染
+      chosen = null;
     }
+
+    const { panelIdx, countryId, alphaByKey } = App._pendingColorEdit;
+    if (chosen) {
+      setCountryColorOverride(panelIdx, countryId, chosen, alphaByKey);
+    }
+
+    App._pendingColorEdit = null;
+    hideColorMenu();
+    updateHexStyles();
   });
+
+
   menu.querySelector('#alt-color-cancel').addEventListener('click', () => {
     App._pendingColorEdit = null; // 丢弃预览
     hideColorMenu();
@@ -906,6 +1103,8 @@ function hideColorMenu() {
       return out; // Array<"panelIdx|q,r">
     }
 
+
+
     // —— 预览工具：根据当前模式，计算鼠标悬停点应该高亮的 key 集 —— //
     function computeHoverPreview(panelIdx, q, r, { withCtrl=false, withShift=false } = {}) {
       const ctrlLike   = !!withCtrl;
@@ -1132,6 +1331,9 @@ function hideColorMenu() {
 
     return { setVisualState, computeAndApply, forceGroupDefault, computeHoverPreview };
   })();
+
+
+
 
   function beginInsertMode(route, anchorIdx){
     App.insertMode = { routeId: linkKey(route), anchorIndex: anchorIdx, inserting: true };
@@ -2047,7 +2249,7 @@ function hideColorMenu() {
     }
   }
 
-  function updateHexStyles() {
+function updateHexStyles() {
     App.subspaceSvgs.forEach((svg, panelIdx) => {
       const override = App.panelFocusOverrides.get(panelIdx);
       const focusCid  = override && override.countryId ? normalizeCountryId(override.countryId)
@@ -2159,32 +2361,6 @@ function hideColorMenu() {
       });
     });
   }
-
-
-  // 仅取“一跳”邻居（不做整片扩展），返回 Set<"panelIdx|q,r">
-  function starKeys(panelIdx, q, r) {
-    const adj = buildUndirectedAdjacency();
-    const me = `${panelIdx}|${q},${r}`;
-    const out = new Set([me]);
-
-    // 邻居：来自无向邻接表（roads/rivers，跨 panel 时也会带 panelIdx）
-    const nbs = adj.get(me);
-    if (nbs && nbs.size) nbs.forEach(k => out.add(k));
-
-    // 若需要把 flight 端点也视为“一跳”，加上这段：
-    for (const link of (App._lastLinks || [])) {
-      if (link.type !== 'flight') continue;
-      const a = link.path?.[0];
-      const b = link.path?.[link.path.length - 1];
-      if (!a || !b) continue;
-      const aPanel = resolvePanelIdxForPathPoint(a, link, 0);
-      const bPanel = resolvePanelIdxForPathPoint(b, link, (link.path?.length || 1) - 1);
-      if (aPanel === panelIdx && a.q === q && a.r === r) out.add(`${bPanel}|${b.q},${b.r}`);
-      if (bPanel === panelIdx && b.q === q && b.r === r) out.add(`${aPanel}|${a.q},${a.r}`);
-    }
-
-    return out;
-}
 
 
   /* =========================
@@ -2488,26 +2664,6 @@ function hideColorMenu() {
     }
   }
 
-  function clearAltFocusForPanelOnNormalClick(panelIdx) {
-    let changed = false;
-
-    // 全局 Alt 聚焦关掉（不影响你已确认的颜色表）
-    if (App.focusCountryId) {
-      setCountryFocus(null, null);   // 会清 App.highlightedHexKeys
-      changed = true;
-    }
-
-    // 本面板若有本地聚焦也一并关掉
-    const local = App.panelFocusOverrides.get(panelIdx);
-    if (local && local.countryId) {
-      App.panelFocusOverrides.set(panelIdx, { countryId: null, mode: null });
-      changed = true;
-    }
-
-    if (changed) updateHexStyles();  // 让整国涂色立刻消失
-  }
-
-
 
   function handleSingleClick(panelIdx, q, r, withCtrl = false, withShift = false) {
     const k = pkey(panelIdx, q, r);
@@ -2559,7 +2715,8 @@ function hideColorMenu() {
       return;
     }
 
-    // —— 非 Alt：降级聚焦（filled → outline），保留边框
+    // ★★★ 非 Alt 点击：先把“Alt 整国着色”关掉（仅关视觉聚焦，不清你的颜色记录）
+    // clearAltFocusForPanelOnNormalClick(panelIdx);
     degradeFocusToOutlineFor(panelIdx);
 
     // —— Connect Active：插入模式优先（含“等待锚点”的绿灯）——————————————
@@ -3239,33 +3396,33 @@ function exportMiniColorMaps() {
 
     pulseSelection() { publishToStepAnalysis(); },
     getSelectionSnapshot() {
-      // （原逻辑不变）
-      let snap;
-      if (App.selectedRouteIds && App.selectedRouteIds.size > 0) {
-        snap = snapshotFromSelectedRoutes();
-      } else {
-        const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
-          ? App.highlightedHexKeys
-          : App.persistentHexKeys;
-        snap = snapshotFromKeySet(keySet || new Set());
-      }
+        let snap;
+        if (App.selectedRouteIds && App.selectedRouteIds.size > 0) {
+          snap = snapshotFromSelectedRoutes();
+        } else {
+          const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
+            ? App.highlightedHexKeys
+            : App.persistentHexKeys;
+          snap = snapshotFromKeySet(keySet || new Set());
+        }
+        const focusId = App.selectedHex
+          ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
+          : null;
 
-      const focusId = App.selectedHex
-        ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
-        : null;
+        // 想一起返回也可以（可选）
+        const mini = _buildMiniSnapshot();
+        return { ...snap, meta: { focusId, miniPalette: mini } };
+      },
 
-      // ★ 把颜色快照也放入 meta（关键改动）
-      const { colorByCountry, colorByPanelCountry } = _buildColorMapsSnapshot();
+      // ✅ 单独提供 getMiniColorMaps 给 MainView.vue 用
+      getMiniColorMaps() {
+        return _buildMiniSnapshot();
+      },
 
-      return { 
-        ...snap, 
-        meta: { 
-          focusId, 
-          colorByCountry, 
-          colorByPanelCountry 
-        } 
-      };
-    },
+      // 可选
+      getCountryIdNormalizer() {
+        return (cid) => App.countryIdAlias?.get?.(cid) || cid;
+      },
 
       // ★ FIX: 通过坐标直接拿该格完整信息
       getHexDetail(panelIdx, q, r) {
@@ -3302,58 +3459,6 @@ function exportMiniColorMaps() {
         };
       },
 
-
-    // 可选：把颜色映射直接塞进 getSelectionSnapshot 的返回里，方便一处拿齐
-    getSelectionSnapshot() {
-      // === 你原有的实现开始 ===
-      let snap;
-      if (App.selectedRouteIds && App.selectedRouteIds.size > 0) {
-        snap = snapshotFromSelectedRoutes();
-      } else {
-        const keySet = (App.highlightedHexKeys && App.highlightedHexKeys.size)
-          ? App.highlightedHexKeys
-          : App.persistentHexKeys;
-        snap = snapshotFromKeySet(keySet || new Set());
-      }
-      const focusId = App.selectedHex
-        ? `${App.selectedHex.panelIdx}:${App.selectedHex.q},${App.selectedHex.r}`
-        : null;
-      // === 你原有的实现结束 ===
-
-      // ★ 新增：把颜色映射带回去
-      const miniPalette = _buildMiniColorMaps();
-      return { ...snap, meta: { focusId, miniPalette } };
-    },
-
-  // 在 return controller 之前，组装 controller 对象时加入：
-  getMiniColorMaps() {
-    // 面板+国家 -> 颜色
-    const colorByPanelCountry = {};
-    (App.panelCountryColors || new Map()).forEach((m, panelIdx) => {
-      (m || new Map()).forEach((rec, cid) => {
-        colorByPanelCountry[`${panelIdx}|${cid}`] = rec?.color || null;
-      });
-    });
-
-    // 全局国家 -> 颜色（聚合同一国家的第一条颜色即可）
-    const colorByCountry = {};
-    (App.panelCountryColors || new Map()).forEach((m) => {
-      (m || new Map()).forEach((rec, cid) => {
-        if (!(cid in colorByCountry)) colorByCountry[cid] = rec?.color || null;
-      });
-    });
-
-    // 提供与别名一致的归一化函数（小卡也用同一套）
-    const normalizeCountryId = (cid) => App.countryIdAlias.get(cid) || cid;
-
-    return { colorByCountry, colorByPanelCountry, normalizeCountryId };
-  },
-
-
-  // 可选：给小卡传“国家ID归一化”函数（如果你使用了别名）
-  getCountryIdNormalizer() {
-    return (cid) => App.countryIdAlias.get(cid) || cid;
-  },
 
   };
 

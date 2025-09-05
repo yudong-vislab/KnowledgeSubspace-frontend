@@ -36,6 +36,20 @@ export function renderMiniPath(svgEl, link, nodes, opts = {}) {
   const colorByCountry = opts.colorByCountry || null;
   const colorByPanelCountry = opts.colorByPanelCountry || null;
 
+  // ★ NEW：透明度映射
+  const alphaByNode = opts.alphaByNode || null;        // Map|Object，key "panelIdx:q,r"
+  const defaultAlpha = (typeof opts.defaultAlpha === 'number') ? opts.defaultAlpha : 1;
+
+  // 如果你文件里还没有 pick 辅助函数，加一个非常小的：
+  const pick = (mapLike, key) => {
+    if (!mapLike) return null;
+    const k1 = key, k2 = String(key);
+    if (mapLike instanceof Map) return mapLike.get(k1) ?? mapLike.get(k2) ?? null;
+    if (typeof mapLike === 'object') return (mapLike[k1] ?? mapLike[k2] ?? null);
+    return null;
+  };
+
+
   const idOf = (p,q,r) => `${p}:${q},${r}`;
   const normalize = (cid) => cid; // 若你有同名函数可直接用
 
@@ -64,6 +78,7 @@ export function renderMiniPath(svgEl, link, nodes, opts = {}) {
     svg.attr('width', 0).attr('height', STYLE.H);
     return;
   }
+
 
   // ⭐ 修改：颜色解析（面板|国家 → 全局国家 → modality）
   const colorOfNode = (n) => {
@@ -124,9 +139,19 @@ export function renderMiniPath(svgEl, link, nodes, opts = {}) {
         .attr('transform', d => `translate(${d.x},${d.y})`);
       gg.append('path')
         .attr('d', hexD)
-        .attr('fill', d => resolveNodeColor(nodeMap.get(idOf(d.panelIdx,d.q,d.r))))
+        .attr('fill', d => {
+          const n = nodeMap.get(idOf(d.panelIdx,d.q,d.r));
+          return colorOfNode(n);              // 你原来的颜色解析保持不变
+        })
+        .attr('fill-opacity', d => {          // ★ NEW：节点透明度
+          const key = idOf(d.panelIdx, d.q, d.r);      // "panelIdx:q,r"
+          const a = pick(alphaByNode, key);
+          return (typeof a === 'number' && a >= 0 && a <= 1) ? a : defaultAlpha;
+        })
         .attr('stroke', '#ffffff')
         .attr('stroke-width', 1);
       return gg;
     });
 }
+
+
