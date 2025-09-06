@@ -56,65 +56,147 @@ const chartContainerRef = ref(null);
 // 眼睛图标的 SVG 路径数据
 const eyePathData = "M12 4.5c-6.627 0-12 7.072-12 7.5s5.373 7.5 12 7.5 12-7.072 12-7.5-5.373-7.5-12-7.5zm0 12c-2.485 0-4.5-2.015-4.5-4.5s2.015-4.5 4.5-4.5 4.5 2.015 4.5 4.5-2.015 4.5-4.5 4.5zm0-7.5c-1.657 0-3 1.343-3 3s1.343 3 3 3 3-1.343 3-3-1.343-3-3-3z";
 
-function generateRandomData() {
-  const domains = ["Chemistry", "Society", "Visualization"];
-  let globalIndex = 1;
+function generateFixedData() {
+  // 定义6个固定的文件映射，基于实际文件名
+  const fileMappings = [
+    {
+      id: 0,
+      pdfFile: '0_1911.12919v1.pdf',
+      imageFile: '0_page_0_Figure_8.jpeg',
+      name: '1911.12919v1',
+      year: '2020',
+      count: 45,
+      domain: 'Air Pollution'
+    },
+    {
+      id: 1,
+      pdfFile: '1_3219819.3219822.pdf',
+      imageFile: '1_page_1_Figure_17.jpeg',
+      name: '3219819.3219822',
+      year: '2019',
+      count: 38,
+      domain: 'Air Pollution'
+    },
+    {
+      id: 2,
+      pdfFile: '2_acp-24-2423-2024.pdf',
+      imageFile: '2_page_6_Figure_1.jpeg',
+      name: 'acp-24-2423-2024',
+      year: '2024',
+      count: 52,
+      domain: 'Air Pollution'
+    },
+    {
+      id: 3,
+      pdfFile: '3_acp-25-9061-2025.pdf',
+      imageFile: '3_page_8_Figure_1.jpeg',
+      name: 'acp-25-9061-2025',
+      year: '2025',
+      count: 41,
+      domain: 'Air Pollution'
+    },
+    {
+      id: 4,
+      pdfFile: '4_airvis.pdf',
+      imageFile: '4_page_0_Figure_2.jpeg',
+      name: 'airvis',
+      year: '2022',
+      count: 35,
+      domain: 'Air Pollution'
+    },
+    {
+      id: 5,
+      pdfFile: '5_atmosphere-07-00035.pdf',
+      imageFile: '5_page_2_Figure_4.jpeg',
+      name: 'atmosphere-07-00035',
+      year: '2020',
+      count: 48,
+      domain: 'Air Pollution'
+    }
+  ];
 
-  function randomPaper(index) {
-    // 模拟图片路径
-    const images = [
-      '2025-09-03_152404.png',
-      '2025-09-03_152507.png',
-      '2025-09-03_152535.png',
-      '2025-09-03_152602.png'
-    ].map(fileName => {
-      // `../assets/pictures/` 是相对于当前组件文件而言的相对路径
-      return new URL(`../assets/pictures/${fileName}`, import.meta.url).href;
-    });
-    // 模拟 PDF 文件路径和名称
-    const filenames = [
-      '2019-Air pollution a global problem needs local fixes.pdf',
-      '2019-AirInsight Visual Exploration and Interpretation of Latent Patterns and Anomalies in Air Quality Data.pdf',
-      '2019-AirVis Visual Analytics of Air Pollution Propagation.pdf',
-      '2019-Visual Exploration of Air Quality Data with a Time-correlation-partitioning Tree Based on Information Theory.pdf'
-    ];
+  // 创建完整的文件数据，使用精确的文件名匹配
+  const mappedFiles = fileMappings.map(item => ({
+    name: item.name,
+    id: `${item.id}`,
+    globalIndex: item.id,
+    year: item.year,
+    count: item.count,
+    content: new URL(`../assets/pictures/case_2/${item.imageFile}`, import.meta.url).href,
+    pdfUrl: new URL(`../assets/pdf/case2/${item.pdfFile}`, import.meta.url).href,
+    domain: item.domain
+  }));
 
-    const pdfs = filenames.map(filename => {
-      return new URL(`../assets/pdf/${filename}`, import.meta.url).href;
-    });
+  // 按领域分组（全部归入Air Pollution）
+  const groupedData = [{
+    domain: 'Air Pollution',
+    value: mappedFiles,
+    Total: mappedFiles.length.toString()
+  }];
 
-    const randomImage = images[Math.floor(Math.random() * images.length)];
-    const randomPdfUrl = pdfs[Math.floor(Math.random() * pdfs.length)];
-    const paperName = `Paper ${globalIndex}`;
-
-    return {
-      name: paperName,
-      id: `${index}`,
-      globalIndex: globalIndex++,
-      year: (2000 + Math.floor(Math.random() * 26)).toString(),
-      count: Math.floor(Math.random() * 40),
-      content: randomImage, // 使用 content 字段存储图片路径
-      pdfUrl: randomPdfUrl,
-      domain: domains[Math.floor(Math.random() * domains.length)]
-    };
-  }
-
-  return domains.map(domain => {
-    const paperCount = Math.floor(Math.random() * 8) + 1;
-    const papers = Array.from({ length: paperCount }, (_, i) => ({
-      ...randomPaper(i + 1),
-      domain: domain
-    }));
-    return {
-      domain,
-      value: papers,
-      Total: paperCount.toString()
-    };
-  });
+  return groupedData;
 }
 
+
+// function generateRandomData() {
+//   const domains = ["Chemistry", "Society", "Visualization"];
+//   let globalIndex = 1;
+
+//   function randomPaper(index) {
+//     // 模拟图片路径
+//     const images = [
+//       '2025-09-03_152404.png',
+//       '2025-09-03_152507.png',
+//       '2025-09-03_152535.png',
+//       '2025-09-03_152602.png'
+//     ].map(fileName => {
+//       // `../assets/pictures/` 是相对于当前组件文件而言的相对路径
+//       return new URL(`../assets/pictures/${fileName}`, import.meta.url).href;
+//     });
+//     // 模拟 PDF 文件路径和名称
+//     const filenames = [
+//       '2019-Air pollution a global problem needs local fixes.pdf',
+//       '2019-AirInsight Visual Exploration and Interpretation of Latent Patterns and Anomalies in Air Quality Data.pdf',
+//       '2019-AirVis Visual Analytics of Air Pollution Propagation.pdf',
+//       '2019-Visual Exploration of Air Quality Data with a Time-correlation-partitioning Tree Based on Information Theory.pdf'
+//     ];
+
+//     const pdfs = filenames.map(filename => {
+//       return new URL(`../assets/pdf/${filename}`, import.meta.url).href;
+//     });
+
+//     const randomImage = images[Math.floor(Math.random() * images.length)];
+//     const randomPdfUrl = pdfs[Math.floor(Math.random() * pdfs.length)];
+//     const paperName = `Paper ${globalIndex}`;
+
+//     return {
+//       name: paperName,
+//       id: `${index}`,
+//       globalIndex: globalIndex++,
+//       year: (2000 + Math.floor(Math.random() * 26)).toString(),
+//       count: Math.floor(Math.random() * 40),
+//       content: randomImage, // 使用 content 字段存储图片路径
+//       pdfUrl: randomPdfUrl,
+//       domain: domains[Math.floor(Math.random() * domains.length)]
+//     };
+//   }
+
+//   return domains.map(domain => {
+//     const paperCount = Math.floor(Math.random() * 8) + 1;
+//     const papers = Array.from({ length: paperCount }, (_, i) => ({
+//       ...randomPaper(i + 1),
+//       domain: domain
+//     }));
+//     return {
+//       domain,
+//       value: papers,
+//       Total: paperCount.toString()
+//     };
+//   });
+// }
+
 function drawChart() {
-  const chartData = generateRandomData();
+  const chartData = generateFixedData();
   console.log("data:", chartData);
 
   // 创建颜色比例尺
@@ -130,7 +212,7 @@ function drawChart() {
   const groupPadding_left = 50;
   const groupPadding_top = 10;
   const rectWidth = 34;
-  const rectHeight = 45;
+  const rectHeight = 30;
   const rectPadding_x = 10;
   const rectPadding_y = 25;
   const rectsPerRow = 5;

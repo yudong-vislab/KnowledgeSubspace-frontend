@@ -911,7 +911,7 @@ function renderHexTooltipHTML({ color = '#999', msuCount = 0, summary = '' }) {
   const safeSummary = (summary || '').toString().trim();
   // 根据数量决定显示 "MSU" 还是 "MSUs"
   const label = msuCount === 1 ? 'MSU' : 'MSUs';
-
+  console.log('renderHexTooltipHTML', color, msuCount, summary);
   return `
     <div style="display:flex;align-items:center;gap:8px">
       <span style="
@@ -1782,6 +1782,13 @@ function hideHexTooltip() {
     let container = svg.select('g');
     if (container.empty()) container = svg.append('g');
 
+    console.log('=== DEBUG space.hexList ===', {
+      panelIdx,
+      hexListLength: space.hexList?.length || 0,
+      firstHex: space.hexList?.[0],
+      hasSummary: space.hexList?.[0]?.summary !== undefined,
+      summaryValue: space.hexList?.[0]?.summary
+    });
     // 数据坐标（平顶六边形）
     const rawHexList = (space.hexList || []).map(h => {
       const x = (3 / 4) * 2 * hexRadius * h.q;
@@ -1896,6 +1903,7 @@ function hideHexTooltip() {
             const msuCount = Array.isArray(hex?.msu_ids) ? hex.msu_ids.length : 0;
 
             // 2) 读取 summary（后端放在 hex 对象上；没有就为空字符串）
+            // console.log('renderHexgridfromdata', hex);    //这里就没有summary
             const summary = (hex && typeof hex.summary === 'string') ? hex.summary : '';
 
             // 3) 取当前“国家色”（优先用面板内覆盖色；否则用聚焦色；最后兜底基础填充）
@@ -1920,6 +1928,7 @@ function hideHexTooltip() {
               }
             }
             // 4) 显示 tooltip（用 client 坐标）
+            console.log('renderHexgridfromdata', color, msuCount, summary);
             showHexTooltip(event.clientX, event.clientY, { color, msuCount, summary });
 
           })
@@ -2019,7 +2028,11 @@ function hideHexTooltip() {
 
     // 构建 map
     const hexMap = new Map();
-    hexList.forEach(d => hexMap.set(`${d.q},${d.r}`, d));
+    // hexList.forEach(d => hexMap.set(`${d.q},${d.r}`, d));
+    hexList.forEach(d => {
+      // console.log('Building hexMap:', d.q, d.r, 'summary:', d.summary, 'full object:', d);
+      hexMap.set(`${d.q},${d.r}`, d);
+    });
     App.hexMapsByPanel[panelIdx] = hexMap;
 
     updateHexStyles();
@@ -3039,6 +3052,7 @@ function updateHexStyles() {
         { q: b.q, r: b.r, panelIdx: b.panelIdx }
       ]
     };
+    console.log("flight:", flight);
     App._lastLinks.push(flight);
     drawOverlayLinesFromLinks(App._lastLinks, App.allHexDataByPanel, App.hexMapsByPanel, false);
     publishToStepAnalysis();
